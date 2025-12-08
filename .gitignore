@@ -1,3 +1,7 @@
 .env
 data/*
 *__pycache__*
+data_quality_check.py
+logs/*
+plugins/*
+config/*
