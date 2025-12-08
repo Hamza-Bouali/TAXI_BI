@@ -2,6 +2,7 @@
 NYC Green Taxi Data Pipeline
 Extract NYC Green Taxi trip data from CloudFront API and store it locally.
 Supports backfilling with date-based parameterization.
+Loads data into both staging database and OLAP data warehouse.
 """
 
 from datetime import datetime, timedelta
@@ -12,6 +13,7 @@ import pandas as pd
 import requests
 import os
 from sqlalchemy import create_engine, text
+import numpy as np
 
 # Default arguments for the DAG
 default_args = {
@@ -157,6 +159,291 @@ def load_data(**context):
         raise
 
 
+def check_and_create_dwh_schema(**context):
+    """Check if DWH schema exists, create if not"""
+    
+    print("Checking Data Warehouse schema...")
+    
+    # Data Warehouse connection
+    dwh_cred = {
+        'USER': 'dwh_admin',
+        'PASSWORD': 'dwh_password',
+        'HOST': 'postgres-dwh',  # Docker service name
+        'PORT': '5432',
+        'DBNAME': 'taxi_dwh',
+    }
+    dwh_connection_string = f"postgresql+psycopg2://{dwh_cred['USER']}:{dwh_cred['PASSWORD']}@{dwh_cred['HOST']}:{dwh_cred['PORT']}/{dwh_cred['DBNAME']}"
+    
+    try:
+        engine = create_engine(dwh_connection_string)
+        
+        with engine.connect() as conn:
+            # Check if fact_trips table exists
+            result = conn.execute(text("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    AND table_name = 'fact_trips'
+                );
+            """))
+            schema_exists = result.scalar()
+            
+            if schema_exists:
+                print("✓ Data warehouse schema already exists")
+                
+                # Check all required tables
+                required_tables = ['dim_date', 'dim_location', 'dim_vendor', 
+                                 'dim_payment_type', 'dim_rate_code', 'fact_trips']
+                
+                for table in required_tables:
+                    result = conn.execute(text(f"""
+                        SELECT EXISTS (
+                            SELECT FROM information_schema.tables 
+                            WHERE table_schema = 'public' 
+                            AND table_name = '{table}'
+                        );
+                    """))
+                    exists = result.scalar()
+                    print(f"  {'✓' if exists else '✗'} {table}: {'exists' if exists else 'missing'}")
+                
+                # Check dimension data
+                dim_counts = {}
+                for table in ['dim_date', 'dim_vendor', 'dim_payment_type', 'dim_rate_code']:
+                    result = conn.execute(text(f"SELECT COUNT(*) FROM {table}"))
+                    count = result.scalar()
+                    dim_counts[table] = count
+                    print(f"  {table}: {count} records")
+                
+            else:
+                print("✗ Data warehouse schema does not exist. Creating...")
+                
+                # Read and execute schema creation script
+                schema_sql_path = '/opt/airflow/sql/create_dwh_schema.sql'
+                print(f"Reading schema from: {schema_sql_path}")
+                
+                with open(schema_sql_path, 'r') as f:
+                    schema_sql = f.read()
+                
+                # Execute schema creation
+                conn.execute(text(schema_sql))
+                conn.commit()
+                print("✓ Schema created successfully")
+                
+                # Populate dimensions
+                populate_sql_path = '/opt/airflow/sql/populate_dimensions.sql'
+                print(f"Populating dimensions from: {populate_sql_path}")
+                
+                with open(populate_sql_path, 'r') as f:
+                    populate_sql = f.read()
+                
+                conn.execute(text(populate_sql))
+                conn.commit()
+                print("✓ Dimensions populated successfully")
+                
+                # Create helper functions
+                helpers_sql_path = '/opt/airflow/sql/helper_functions.sql'
+                print(f"Creating helper functions from: {helpers_sql_path}")
+                
+                with open(helpers_sql_path, 'r') as f:
+                    helpers_sql = f.read()
+                
+                conn.execute(text(helpers_sql))
+                conn.commit()
+                print("✓ Helper functions created successfully")
+                
+        engine.dispose()
+        print("✓ Schema check complete")
+        return True
+        
+    except Exception as e:
+        print(f"Error checking/creating schema: {e}")
+        raise
+
+
+def load_to_dwh(**context):
+    """Transform and load data into the OLAP Data Warehouse"""
+    
+    file_path = context['ti'].xcom_pull(key='file_path', task_ids='extract')
+    year_month = context['ti'].xcom_pull(key='year_month', task_ids='extract')
+    
+    print(f"Loading data for {year_month} into Data Warehouse")
+    print(f"File: {file_path}")
+    
+    # Data Warehouse connection
+    dwh_cred = {
+        'USER': 'postgres.xgoybmnqftaiismchzhj',
+        'PASSWORD': 'nyc_data',
+        'HOST': 'aws-1-eu-north-1.pooler.supabase.com',  # Docker service name
+        'PORT': '6543',
+        'DBNAME': 'postgres',
+    }
+    dwh_connection_string = f"postgresql+psycopg2://{dwh_cred['USER']}:{dwh_cred['PASSWORD']}@{dwh_cred['HOST']}:{dwh_cred['PORT']}/{dwh_cred['DBNAME']}"
+    
+    try:
+        # Create SQLAlchemy engine
+        engine = create_engine(dwh_connection_string)
+        
+        # Read the parquet file
+        df = pd.read_parquet(file_path)
+        
+        print(f"Transforming {len(df)} records for data warehouse...")
+        
+        # Clean and prepare data
+        df = df.copy()
+        
+        # Handle missing values and data types
+        df['VendorID'] = df['VendorID'].fillna(-1).astype(int)
+        df['RatecodeID'] = df['RatecodeID'].fillna(-1).astype(int)
+        df['PULocationID'] = df['PULocationID'].fillna(-1).astype(int)
+        df['DOLocationID'] = df['DOLocationID'].fillna(-1).astype(int)
+        df['payment_type'] = df['payment_type'].fillna(-1).astype(int)
+        df['passenger_count'] = df['passenger_count'].fillna(0).astype(int)
+        
+        # Calculate trip duration in minutes
+        df['lpep_pickup_datetime'] = pd.to_datetime(df['lpep_pickup_datetime'])
+        df['lpep_dropoff_datetime'] = pd.to_datetime(df['lpep_dropoff_datetime'])
+        df['trip_duration_minutes'] = (
+            (df['lpep_dropoff_datetime'] - df['lpep_pickup_datetime']).dt.total_seconds() / 60
+        ).round().astype(int)
+        
+        # Extract date key (YYYYMMDD format)
+        df['pickup_date_key'] = df['lpep_pickup_datetime'].dt.strftime('%Y%m%d').astype(int)
+        
+        # Filter out invalid records
+        df = df[
+            (df['trip_distance'] > 0) & 
+            (df['fare_amount'] > 0) & 
+            (df['trip_duration_minutes'] > 0) &
+            (df['trip_duration_minutes'] < 1440)  # Less than 24 hours
+        ]
+        
+        print(f"After filtering: {len(df)} valid records")
+        
+        with engine.connect() as conn:
+            # Start transaction
+            trans = conn.begin()
+            
+            try:
+                # 1. Populate dim_location for new locations
+                print("Updating dim_location...")
+                unique_pickup_locations = df['PULocationID'].unique()
+                unique_dropoff_locations = df['DOLocationID'].unique()
+                all_locations = np.unique(np.concatenate([unique_pickup_locations, unique_dropoff_locations]))
+                
+                for loc_id in all_locations:
+                    if loc_id > 0:  # Skip invalid location IDs
+                        # Check if location exists
+                        result = conn.execute(text(
+                            "SELECT location_key FROM dim_location WHERE location_id = :loc_id"
+                        ), {"loc_id": int(loc_id)})
+                        
+                        if result.fetchone() is None:
+                            # Get next location_key
+                            max_key_result = conn.execute(text(
+                                "SELECT COALESCE(MAX(location_key), 0) FROM dim_location WHERE location_key > 0"
+                            ))
+                            next_key = max_key_result.scalar() + 1
+                            
+                            # Insert new location
+                            conn.execute(text("""
+                                INSERT INTO dim_location (location_key, location_id, zone_name, borough)
+                                VALUES (:key, :id, :name, :borough)
+                            """), {
+                                "key": next_key,
+                                "id": int(loc_id),
+                                "name": f"Zone {loc_id}",
+                                "borough": "Unknown"
+                            })
+                
+                # 2. Create lookup dictionaries for dimension keys
+                print("Creating dimension key lookups...")
+                
+                # Vendor lookup
+                vendor_lookup = pd.read_sql(
+                    "SELECT vendor_id, vendor_key FROM dim_vendor",
+                    conn
+                ).set_index('vendor_id')['vendor_key'].to_dict()
+                
+                # Location lookup
+                location_lookup = pd.read_sql(
+                    "SELECT location_id, location_key FROM dim_location",
+                    conn
+                ).set_index('location_id')['location_key'].to_dict()
+                
+                # Payment type lookup
+                payment_lookup = pd.read_sql(
+                    "SELECT payment_type_id, payment_type_key FROM dim_payment_type",
+                    conn
+                ).set_index('payment_type_id')['payment_type_key'].to_dict()
+                
+                # Rate code lookup
+                rate_code_lookup = pd.read_sql(
+                    "SELECT rate_code_id, rate_code_key FROM dim_rate_code",
+                    conn
+                ).set_index('rate_code_id')['rate_code_key'].to_dict()
+                
+                # 3. Transform fact table data
+                print("Transforming fact table data...")
+                fact_df = pd.DataFrame({
+                    'vendor_key': df['VendorID'].map(vendor_lookup).fillna(-1).astype(int),
+                    'pickup_location_key': df['PULocationID'].map(location_lookup).fillna(-1).astype(int),
+                    'dropoff_location_key': df['DOLocationID'].map(location_lookup).fillna(-1).astype(int),
+                    'payment_type_key': df['payment_type'].map(payment_lookup).fillna(-1).astype(int),
+                    'rate_code_key': df['RatecodeID'].map(rate_code_lookup).fillna(-1).astype(int),
+                    'pickup_date_key': df['pickup_date_key'],
+                    'passenger_count': df['passenger_count'].astype(int),
+                    'trip_distance_miles': df['trip_distance'].round(2),
+                    'trip_duration_minutes': df['trip_duration_minutes'],
+                    'fare_amount': df['fare_amount'].round(2),
+                    'extra_amount': df['extra'].fillna(0).round(2),
+                    'mta_tax': df['mta_tax'].fillna(0).round(2),
+                    'tip_amount': df['tip_amount'].fillna(0).round(2),
+                    'tolls_amount': df['tolls_amount'].fillna(0).round(2),
+                    'improvement_surcharge': df['improvement_surcharge'].fillna(0).round(2),
+                    'total_amount': df['total_amount'].round(2),
+                    'congestion_surcharge': df['congestion_surcharge'].fillna(0).round(2) if 'congestion_surcharge' in df.columns else 0,
+                    'trip_type': df['trip_type'].fillna(0).astype(int) if 'trip_type' in df.columns else 0,
+                    'source_file': f'green_tripdata_{year_month}.parquet'
+                })
+                
+                # 4. Load fact table
+                print(f"Loading {len(fact_df)} records into fact_trips...")
+                fact_df.to_sql(
+                    name='fact_trips',
+                    con=conn,
+                    if_exists='append',
+                    index=False,
+                    chunksize=5000,
+                    method='multi'
+                )
+                
+                # Commit transaction
+                trans.commit()
+                print(f"Successfully loaded {len(fact_df)} records into data warehouse")
+                
+                # Verify the load
+                result = conn.execute(text(
+                    "SELECT COUNT(*) FROM fact_trips WHERE source_file = :source"
+                ), {"source": f'green_tripdata_{year_month}.parquet'})
+                count = result.scalar()
+                print(f"Verification: fact_trips contains {count} records for {year_month}")
+                
+                # Push metrics to XCom
+                context['ti'].xcom_push(key='dwh_record_count', value=len(fact_df))
+                
+            except Exception as e:
+                trans.rollback()
+                print(f"Transaction rolled back due to error: {e}")
+                raise
+        
+        engine.dispose()
+        return len(fact_df)
+        
+    except Exception as e:
+        print(f"Error loading data to data warehouse: {e}")
+        raise
+
+
 # Define the DAG
 with DAG(
     'nyc_green_taxi_pipeline',
@@ -188,17 +475,29 @@ with DAG(
         python_callable=validate_data,
     )
     
-    # Task 4: Load
+    # Task 4: Load to Staging
     load = PythonOperator(
         task_id='load',
         python_callable=load_data,
     )
     
-    # Task 5: End
+    # Task 5: Check/Create DWH Schema
+    check_schema = PythonOperator(
+        task_id='check_schema',
+        python_callable=check_and_create_dwh_schema,
+    )
+    
+    # Task 6: Load to Data Warehouse
+    load_dwh = PythonOperator(
+        task_id='load_dwh',
+        python_callable=load_to_dwh,
+    )
+    
+    # Task 7: End
     end = BashOperator(
         task_id='end',
         bash_command='echo "NYC Green Taxi pipeline completed for {{ ds }}!"',
     )
     
     # Define task dependencies
-    start >> extract >> validate >> load >> end
+    start >> extract >> validate >> load >> check_schema >> load_dwh >> end

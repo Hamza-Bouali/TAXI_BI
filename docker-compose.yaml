@@ -33,6 +33,7 @@ x-airflow-common:
     - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
     - ${AIRFLOW_PROJ_DIR:-.}/config:/opt/airflow/config
     - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
+    - ${AIRFLOW_PROJ_DIR:-.}/sql:/opt/airflow/sql
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     &airflow-common-depends-on
@@ -52,6 +53,24 @@ services:
       - postgres-db-volume:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  postgres-dwh:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: dwh_admin
+      POSTGRES_PASSWORD: dwh_password
+      POSTGRES_DB: taxi_dwh
+    volumes:
+      - postgres-dwh-volume:/var/lib/postgresql/data
+      - ./sql:/docker-entrypoint-initdb.d
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "dwh_admin"]
       interval: 10s
       retries: 5
       start_period: 5s
@@ -289,3 +308,4 @@ services:
 
 volumes:
   postgres-db-volume:
+  postgres-dwh-volume:
