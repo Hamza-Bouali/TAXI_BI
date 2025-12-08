@@ -1,7 +1,0 @@
-{"timestamp":"2025-12-08T20:19:37.120658Z","level":"info","event":"DAG bundles loaded: dags-folder","logger":"airflow.dag_processing.bundles.manager.DagBundlesManager","filename":"manager.py","lineno":179}
-{"timestamp":"2025-12-08T20:19:37.121263Z","level":"info","event":"Filling up the DagBag from /opt/airflow/dags/etl_pipeline.py","logger":"airflow.models.dagbag.DagBag","filename":"dagbag.py","lineno":593}
-{"timestamp":"2025-12-08T20:19:37.388354Z","level":"warning","event":"The `airflow.operators.python.PythonOperator` attribute is deprecated. Please use `'airflow.providers.standard.operators.python.PythonOperator'`.","category":"DeprecatedImportWarning","filename":"/opt/airflow/dags/etl_pipeline.py","lineno":9,"logger":"py.warnings"}
-{"timestamp":"2025-12-08T20:19:37.388475Z","level":"warning","event":"The `airflow.operators.bash.BashOperator` attribute is deprecated. Please use `'airflow.providers.standard.operators.bash.BashOperator'`.","category":"DeprecatedImportWarning","filename":"/opt/airflow/dags/etl_pipeline.py","lineno":10,"logger":"py.warnings"}
-{"timestamp":"2025-12-08T20:19:37.420357Z","level":"info","event":"Loading data for 2021-07 into PostgreSQL","logger":"task.stdout"}
-{"timestamp":"2025-12-08T20:19:37.420505Z","level":"info","event":"File: /opt/airflow/dags/data/green_tripdata_2021-07.parquet","logger":"task.stdout"}
-{"timestamp":"2025-12-08T20:19:37.446726Z","level":"info","event":"Loading 83691 records to database...","logger":"task.stdout"}
