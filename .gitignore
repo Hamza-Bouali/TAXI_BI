@@ -5,3 +5,5 @@ data_quality_check.py
 logs/*
 plugins/*
 config/*
+
+logs
