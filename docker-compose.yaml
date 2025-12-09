@@ -58,24 +58,6 @@ services:
       start_period: 5s
     restart: always
 
-  postgres-dwh:
-    image: postgres:16
-    environment:
-      POSTGRES_USER: dwh_admin
-      POSTGRES_PASSWORD: dwh_password
-      POSTGRES_DB: taxi_dwh
-    volumes:
-      - postgres-dwh-volume:/var/lib/postgresql/data
-      - ./sql:/docker-entrypoint-initdb.d
-    ports:
-      - "5433:5432"
-    healthcheck:
-      test: ["CMD", "pg_isready", "-U", "dwh_admin"]
-      interval: 10s
-      retries: 5
-      start_period: 5s
-    restart: always
-
   redis:
     # Redis is limited to 7.2-bookworm due to licencing change
     # https://redis.io/blog/redis-adopts-dual-source-available-licensing/
@@ -89,6 +71,9 @@ services:
       retries: 50
       start_period: 30s
     restart: always
+
+  # postgres-dwh service removed - using cloud database instead
+  # Cloud DWH: Supabase at aws-1-eu-north-1.pooler.supabase.com:6543
 
   airflow-apiserver:
     <<: *airflow-common
@@ -308,4 +293,4 @@ services:
 
 volumes:
   postgres-db-volume:
-  postgres-dwh-volume:
+  # postgres-dwh-volume removed - using cloud database

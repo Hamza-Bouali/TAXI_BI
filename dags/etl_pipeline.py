@@ -7,8 +7,8 @@ Loads data into both staging database and OLAP data warehouse.
 
 from datetime import datetime, timedelta
 from airflow import DAG
-from airflow.operators.python import PythonOperator
-from airflow.operators.bash import BashOperator
+from airflow.providers.standard.operators.python import PythonOperator
+from airflow.providers.standard.operators.bash import BashOperator
 import pandas as pd
 import requests
 import os
@@ -111,16 +111,29 @@ def load_data(**context):
     # Database connection string (using the local postgres service from docker-compose)
     # If you want to use Supabase, ensure network connectivity and IPv4 resolution
     stg_table_cred = {
-    'USER':'postgres.fnsjmxoaclpgbrhsxwfr', 
+    'USER':'postgres.wjkkavghitommkkbdzpm', 
     'PASSWORD':"admin",
-    'HOST':"aws-1-eu-west-1.pooler.supabase.com" ,
+    'HOST':"aws-1-eu-central-2.pooler.supabase.com" ,
     'PORT':'6543' ,
     'DBNAME':'postgres',}
-    db_connection_string = f"postgresql+psycopg2://{stg_table_cred['USER']}:{stg_table_cred['PASSWORD']}@{stg_table_cred['HOST']}:{stg_table_cred['PORT']}/{stg_table_cred['DBNAME']}?sslmode=require"
+    db_connection_string = f"postgresql+psycopg2://{stg_table_cred['USER']}:{stg_table_cred['PASSWORD']}@{stg_table_cred['HOST']}:{stg_table_cred['PORT']}/{stg_table_cred['DBNAME']}?sslmode=require&connect_timeout=30"
     
     try:
-        # Create SQLAlchemy engine
-        engine = create_engine(db_connection_string)
+        # Create SQLAlchemy engine with connection pooling settings
+        engine = create_engine(
+            db_connection_string,
+            pool_pre_ping=True,  # Verify connections before using
+            pool_recycle=3600,   # Recycle connections after 1 hour
+            pool_size=5,         # Number of connections to maintain
+            max_overflow=10,     # Max additional connections
+            connect_args={
+                'connect_timeout': 30,
+                'keepalives': 1,
+                'keepalives_idle': 30,
+                'keepalives_interval': 10,
+                'keepalives_count': 5
+            }
+        )
         
         # Read the parquet file
         df = pd.read_parquet(file_path)
@@ -164,18 +177,29 @@ def check_and_create_dwh_schema(**context):
     
     print("Checking Data Warehouse schema...")
     
-    # Data Warehouse connection
+    # Data Warehouse connection (Supabase Cloud)
     dwh_cred = {
-        'USER': 'dwh_admin',
-        'PASSWORD': 'dwh_password',
-        'HOST': 'postgres-dwh',  # Docker service name
-        'PORT': '5432',
-        'DBNAME': 'taxi_dwh',
+        'USER': 'postgres.xgoybmnqftaiismchzhj',
+        'PASSWORD': 'nyc_data',
+        'HOST': 'aws-1-eu-north-1.pooler.supabase.com',
+        'PORT': '6543',
+        'DBNAME': 'postgres',
     }
-    dwh_connection_string = f"postgresql+psycopg2://{dwh_cred['USER']}:{dwh_cred['PASSWORD']}@{dwh_cred['HOST']}:{dwh_cred['PORT']}/{dwh_cred['DBNAME']}"
+    dwh_connection_string = f"postgresql+psycopg2://{dwh_cred['USER']}:{dwh_cred['PASSWORD']}@{dwh_cred['HOST']}:{dwh_cred['PORT']}/{dwh_cred['DBNAME']}?sslmode=require&connect_timeout=30"
     
     try:
-        engine = create_engine(dwh_connection_string)
+        engine = create_engine(
+            dwh_connection_string,
+            pool_pre_ping=True,
+            pool_recycle=3600,
+            connect_args={
+                'connect_timeout': 30,
+                'keepalives': 1,
+                'keepalives_idle': 30,
+                'keepalives_interval': 10,
+                'keepalives_count': 5
+            }
+        )
         
         with engine.connect() as conn:
             # Check if fact_trips table exists
@@ -217,39 +241,48 @@ def check_and_create_dwh_schema(**context):
             else:
                 print("✗ Data warehouse schema does not exist. Creating...")
                 
-                # Read and execute schema creation script
-                schema_sql_path = '/opt/airflow/sql/create_dwh_schema.sql'
-                print(f"Reading schema from: {schema_sql_path}")
+                # Begin transaction
+                trans = conn.begin()
                 
-                with open(schema_sql_path, 'r') as f:
-                    schema_sql = f.read()
-                
-                # Execute schema creation
-                conn.execute(text(schema_sql))
-                conn.commit()
-                print("✓ Schema created successfully")
-                
-                # Populate dimensions
-                populate_sql_path = '/opt/airflow/sql/populate_dimensions.sql'
-                print(f"Populating dimensions from: {populate_sql_path}")
-                
-                with open(populate_sql_path, 'r') as f:
-                    populate_sql = f.read()
-                
-                conn.execute(text(populate_sql))
-                conn.commit()
-                print("✓ Dimensions populated successfully")
-                
-                # Create helper functions
-                helpers_sql_path = '/opt/airflow/sql/helper_functions.sql'
-                print(f"Creating helper functions from: {helpers_sql_path}")
-                
-                with open(helpers_sql_path, 'r') as f:
-                    helpers_sql = f.read()
-                
-                conn.execute(text(helpers_sql))
-                conn.commit()
-                print("✓ Helper functions created successfully")
+                try:
+                    # Read and execute schema creation script
+                    schema_sql_path = '/opt/airflow/sql/create_dwh_schema.sql'
+                    print(f"Reading schema from: {schema_sql_path}")
+                    
+                    with open(schema_sql_path, 'r') as f:
+                        schema_sql = f.read()
+                    
+                    # Execute schema creation
+                    conn.execute(text(schema_sql))
+                    print("✓ Schema created successfully")
+                    
+                    # Populate dimensions
+                    populate_sql_path = '/opt/airflow/sql/populate_dimensions.sql'
+                    print(f"Populating dimensions from: {populate_sql_path}")
+                    
+                    with open(populate_sql_path, 'r') as f:
+                        populate_sql = f.read()
+                    
+                    conn.execute(text(populate_sql))
+                    print("✓ Dimensions populated successfully")
+                    
+                    # Create helper functions
+                    helpers_sql_path = '/opt/airflow/sql/helper_functions.sql'
+                    print(f"Creating helper functions from: {helpers_sql_path}")
+                    
+                    with open(helpers_sql_path, 'r') as f:
+                        helpers_sql = f.read()
+                    
+                    conn.execute(text(helpers_sql))
+                    print("✓ Helper functions created successfully")
+                    
+                    # Commit transaction
+                    trans.commit()
+                    
+                except Exception as e:
+                    trans.rollback()
+                    print(f"Schema creation failed, rolled back: {e}")
+                    raise
                 
         engine.dispose()
         print("✓ Schema check complete")
@@ -269,19 +302,30 @@ def load_to_dwh(**context):
     print(f"Loading data for {year_month} into Data Warehouse")
     print(f"File: {file_path}")
     
-    # Data Warehouse connection
+    # Data Warehouse connection (Supabase Cloud)
     dwh_cred = {
         'USER': 'postgres.xgoybmnqftaiismchzhj',
         'PASSWORD': 'nyc_data',
-        'HOST': 'aws-1-eu-north-1.pooler.supabase.com',  # Docker service name
+        'HOST': 'aws-1-eu-north-1.pooler.supabase.com',
         'PORT': '6543',
         'DBNAME': 'postgres',
     }
-    dwh_connection_string = f"postgresql+psycopg2://{dwh_cred['USER']}:{dwh_cred['PASSWORD']}@{dwh_cred['HOST']}:{dwh_cred['PORT']}/{dwh_cred['DBNAME']}"
+    dwh_connection_string = f"postgresql+psycopg2://{dwh_cred['USER']}:{dwh_cred['PASSWORD']}@{dwh_cred['HOST']}:{dwh_cred['PORT']}/{dwh_cred['DBNAME']}?sslmode=require&connect_timeout=30"
     
     try:
-        # Create SQLAlchemy engine
-        engine = create_engine(dwh_connection_string)
+        # Create SQLAlchemy engine with connection pooling
+        engine = create_engine(
+            dwh_connection_string,
+            pool_pre_ping=True,
+            pool_recycle=3600,
+            connect_args={
+                'connect_timeout': 30,
+                'keepalives': 1,
+                'keepalives_idle': 30,
+                'keepalives_interval': 10,
+                'keepalives_count': 5
+            }
+        )
         
         # Read the parquet file
         df = pd.read_parquet(file_path)
@@ -324,86 +368,59 @@ def load_to_dwh(**context):
             trans = conn.begin()
             
             try:
-                # 1. Populate dim_location for new locations
+                # 1. Ensure all locations exist in dim_location
                 print("Updating dim_location...")
                 unique_pickup_locations = df['PULocationID'].unique()
                 unique_dropoff_locations = df['DOLocationID'].unique()
                 all_locations = np.unique(np.concatenate([unique_pickup_locations, unique_dropoff_locations]))
                 
                 for loc_id in all_locations:
-                    if loc_id > 0:  # Skip invalid location IDs
-                        # Check if location exists
+                    if loc_id > 0 and loc_id not in [264, 265]:  # Skip invalid/unknown
+                        # Check if location exists (using location_key as the ID)
                         result = conn.execute(text(
-                            "SELECT location_key FROM dim_location WHERE location_id = :loc_id"
+                            "SELECT location_key FROM dim_location WHERE location_key = :loc_id"
                         ), {"loc_id": int(loc_id)})
                         
                         if result.fetchone() is None:
-                            # Get next location_key
-                            max_key_result = conn.execute(text(
-                                "SELECT COALESCE(MAX(location_key), 0) FROM dim_location WHERE location_key > 0"
-                            ))
-                            next_key = max_key_result.scalar() + 1
-                            
-                            # Insert new location
+                            # Insert new location with key = id
                             conn.execute(text("""
-                                INSERT INTO dim_location (location_key, location_id, zone_name, borough)
-                                VALUES (:key, :id, :name, :borough)
+                                INSERT INTO dim_location (location_key, zone_name, borough, is_airport, is_downtown, is_tourist_area)
+                                VALUES (:key, :name, :borough, FALSE, FALSE, FALSE)
                             """), {
-                                "key": next_key,
-                                "id": int(loc_id),
+                                "key": int(loc_id),
                                 "name": f"Zone {loc_id}",
                                 "borough": "Unknown"
                             })
                 
-                # 2. Create lookup dictionaries for dimension keys
-                print("Creating dimension key lookups...")
+                # 2. Map source IDs to dimension keys
+                print("Creating dimension key mappings...")
                 
-                # Vendor lookup
-                vendor_lookup = pd.read_sql(
-                    "SELECT vendor_id, vendor_key FROM dim_vendor",
-                    conn
-                ).set_index('vendor_id')['vendor_key'].to_dict()
+                # For cloud schema: vendor_key matches VendorID directly
+                df['vendor_key'] = df['VendorID'].apply(lambda x: x if x in [1, 2] else -1)
                 
-                # Location lookup
-                location_lookup = pd.read_sql(
-                    "SELECT location_id, location_key FROM dim_location",
-                    conn
-                ).set_index('location_id')['location_key'].to_dict()
+                # Location keys match LocationID directly
+                df['pickup_location_key'] = df['PULocationID'].apply(lambda x: x if x > 0 else -1)
+                df['dropoff_location_key'] = df['DOLocationID'].apply(lambda x: x if x > 0 else -1)
                 
-                # Payment type lookup
-                payment_lookup = pd.read_sql(
-                    "SELECT payment_type_id, payment_type_key FROM dim_payment_type",
-                    conn
-                ).set_index('payment_type_id')['payment_type_key'].to_dict()
+                # Payment type keys match payment_type directly
+                df['payment_type_key'] = df['payment_type'].apply(lambda x: x if x in [1, 2, 3, 4, 5, 6] else -1)
                 
-                # Rate code lookup
-                rate_code_lookup = pd.read_sql(
-                    "SELECT rate_code_id, rate_code_key FROM dim_rate_code",
-                    conn
-                ).set_index('rate_code_id')['rate_code_key'].to_dict()
+                # Rate code keys match RatecodeID directly
+                df['rate_code_key'] = df['RatecodeID'].apply(lambda x: x if x in [1, 2, 3, 4, 5, 6] else -1)
                 
                 # 3. Transform fact table data
                 print("Transforming fact table data...")
                 fact_df = pd.DataFrame({
-                    'vendor_key': df['VendorID'].map(vendor_lookup).fillna(-1).astype(int),
-                    'pickup_location_key': df['PULocationID'].map(location_lookup).fillna(-1).astype(int),
-                    'dropoff_location_key': df['DOLocationID'].map(location_lookup).fillna(-1).astype(int),
-                    'payment_type_key': df['payment_type'].map(payment_lookup).fillna(-1).astype(int),
-                    'rate_code_key': df['RatecodeID'].map(rate_code_lookup).fillna(-1).astype(int),
+                    'vendor_key': df['vendor_key'],
+                    'pickup_location_key': df['pickup_location_key'],
+                    'dropoff_location_key': df['dropoff_location_key'],
+                    'payment_type_key': df['payment_type_key'],
+                    'rate_code_key': df['rate_code_key'],
                     'pickup_date_key': df['pickup_date_key'],
-                    'passenger_count': df['passenger_count'].astype(int),
-                    'trip_distance_miles': df['trip_distance'].round(2),
-                    'trip_duration_minutes': df['trip_duration_minutes'],
-                    'fare_amount': df['fare_amount'].round(2),
-                    'extra_amount': df['extra'].fillna(0).round(2),
-                    'mta_tax': df['mta_tax'].fillna(0).round(2),
-                    'tip_amount': df['tip_amount'].fillna(0).round(2),
-                    'tolls_amount': df['tolls_amount'].fillna(0).round(2),
-                    'improvement_surcharge': df['improvement_surcharge'].fillna(0).round(2),
-                    'total_amount': df['total_amount'].round(2),
-                    'congestion_surcharge': df['congestion_surcharge'].fillna(0).round(2) if 'congestion_surcharge' in df.columns else 0,
-                    'trip_type': df['trip_type'].fillna(0).astype(int) if 'trip_type' in df.columns else 0,
-                    'source_file': f'green_tripdata_{year_month}.parquet'
+                    'passenger_count': df['passenger_count'].astype('Int16'),
+                    'trip_distance_miles': df['trip_distance'].astype(float),
+                    'trip_duration_minutes': df['trip_duration_minutes'].astype('Int16'),
+                    'fare_amount': df['fare_amount'].round(2)
                 })
                 
                 # 4. Load fact table
@@ -422,11 +439,9 @@ def load_to_dwh(**context):
                 print(f"Successfully loaded {len(fact_df)} records into data warehouse")
                 
                 # Verify the load
-                result = conn.execute(text(
-                    "SELECT COUNT(*) FROM fact_trips WHERE source_file = :source"
-                ), {"source": f'green_tripdata_{year_month}.parquet'})
+                result = conn.execute(text("SELECT COUNT(*) FROM fact_trips"))
                 count = result.scalar()
-                print(f"Verification: fact_trips contains {count} records for {year_month}")
+                print(f"Verification: fact_trips now contains {count} total records")
                 
                 # Push metrics to XCom
                 context['ti'].xcom_push(key='dwh_record_count', value=len(fact_df))

@@ -6,10 +6,10 @@
 CREATE OR REPLACE FUNCTION populate_dim_date(start_date DATE, end_date DATE)
 RETURNS INTEGER AS $$
 DECLARE
-    current_date DATE := start_date;
+    iter_date DATE := start_date;
     records_inserted INTEGER := 0;
 BEGIN
-    WHILE current_date <= end_date LOOP
+    WHILE iter_date <= end_date LOOP
         INSERT INTO dim_date (
             date_key, 
             full_date, 
@@ -23,26 +23,26 @@ BEGIN
             season
         )
         VALUES (
-            TO_CHAR(current_date, 'YYYYMMDD')::INTEGER,
-            current_date,
-            EXTRACT(YEAR FROM current_date)::SMALLINT,
-            EXTRACT(QUARTER FROM current_date)::SMALLINT,
-            EXTRACT(MONTH FROM current_date)::SMALLINT,
-            EXTRACT(DAY FROM current_date)::SMALLINT,
-            EXTRACT(DOW FROM current_date)::SMALLINT,
-            TO_CHAR(current_date, 'Day'),
-            CASE WHEN EXTRACT(DOW FROM current_date) IN (0, 6) THEN TRUE ELSE FALSE END,
+            TO_CHAR(iter_date, 'YYYYMMDD')::INTEGER,
+            iter_date,
+            EXTRACT(YEAR FROM iter_date)::SMALLINT,
+            EXTRACT(QUARTER FROM iter_date)::SMALLINT,
+            EXTRACT(MONTH FROM iter_date)::SMALLINT,
+            EXTRACT(DAY FROM iter_date)::SMALLINT,
+            EXTRACT(DOW FROM iter_date)::SMALLINT,
+            TO_CHAR(iter_date, 'Day'),
+            CASE WHEN EXTRACT(DOW FROM iter_date) IN (0, 6) THEN TRUE ELSE FALSE END,
             CASE 
-                WHEN EXTRACT(MONTH FROM current_date) IN (12, 1, 2) THEN 'Winter'
-                WHEN EXTRACT(MONTH FROM current_date) IN (3, 4, 5) THEN 'Spring'
-                WHEN EXTRACT(MONTH FROM current_date) IN (6, 7, 8) THEN 'Summer'
+                WHEN EXTRACT(MONTH FROM iter_date) IN (12, 1, 2) THEN 'Winter'
+                WHEN EXTRACT(MONTH FROM iter_date) IN (3, 4, 5) THEN 'Spring'
+                WHEN EXTRACT(MONTH FROM iter_date) IN (6, 7, 8) THEN 'Summer'
                 ELSE 'Fall'
             END
         )
         ON CONFLICT (full_date) DO NOTHING;
         
         records_inserted := records_inserted + 1;
-        current_date := current_date + INTERVAL '1 day';
+        iter_date := iter_date + INTERVAL '1 day';
     END LOOP;
     
     RETURN records_inserted;

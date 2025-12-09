@@ -10,3 +10,9 @@ logs/*
 dags/data/*.parquet
 dags/data/*.csv
 dags/data/*.json
+
+*.backup
+
+*.md
+
+!README.md

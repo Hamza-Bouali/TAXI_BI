@@ -15,7 +15,7 @@ ON CONFLICT (vendor_id) DO NOTHING;
 -- =====================================================
 INSERT INTO dim_payment_type (payment_type_key, payment_type_id, payment_name, is_electronic)
 VALUES
-    (0, 0, 'Flex Fare trip'),
+    (0, 0, 'Flex Fare trip', FALSE),
     (1, 1, 'Credit card', TRUE),
     (2, 2, 'Cash', FALSE),
     (3, 3, 'No charge', FALSE),
