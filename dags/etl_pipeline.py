@@ -114,7 +114,11 @@ def load_data(**context):
     # Database connection string (using the local postgres service from docker-compose)
     # If you want to use Supabase, ensure network connectivity and IPv4 resolution
     stg_table_cred = Variable.get("stg_db_creds", deserialize_json=True)
-    db_connection_string = f"postgresql+psycopg2://{stg_table_cred['USER']}:{stg_table_cred['PASSWORD']}@{stg_table_cred['HOST']}:{stg_table_cred['PORT']}/{stg_table_cred['DBNAME']}?sslmode=require&connect_timeout=30"
+    
+    # Determine SSL mode based on host
+    ssl_mode = 'require' if 'supabase' in stg_table_cred['HOST'] else 'disable'
+    
+    db_connection_string = f"postgresql+psycopg2://{stg_table_cred['USER']}:{stg_table_cred['PASSWORD']}@{stg_table_cred['HOST']}:{stg_table_cred['PORT']}/{stg_table_cred['DBNAME']}?sslmode={ssl_mode}&connect_timeout=30"
     
     try:
         # Create SQLAlchemy engine with connection pooling settings
@@ -562,7 +566,11 @@ def delete_staging_table(**context):
     
     # Staging database credentials
     stg_table_cred = Variable.get("stg_db_creds", deserialize_json=True)
-    db_connection_string = f"postgresql+psycopg2://{stg_table_cred['USER']}:{stg_table_cred['PASSWORD']}@{stg_table_cred['HOST']}:{stg_table_cred['PORT']}/{stg_table_cred['DBNAME']}?sslmode=require&connect_timeout=30"
+    
+    # Determine SSL mode based on host
+    ssl_mode = 'require' if 'supabase' in stg_table_cred['HOST'] else 'disable'
+    
+    db_connection_string = f"postgresql+psycopg2://{stg_table_cred['USER']}:{stg_table_cred['PASSWORD']}@{stg_table_cred['HOST']}:{stg_table_cred['PORT']}/{stg_table_cred['DBNAME']}?sslmode={ssl_mode}&connect_timeout=30"
     
     try:
         engine = create_engine(db_connection_string)
