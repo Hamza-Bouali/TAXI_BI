@@ -6,13 +6,18 @@ plugins/*
 config/*
 logs/*
 
+
 # Data files
 dags/data/*.parquet
 dags/data/*.csv
 dags/data/*.json
+dags/data/*
 
 *.backup
 
 *.md
 
 !README.md
+
+
+superset

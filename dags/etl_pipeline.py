@@ -12,7 +12,10 @@ from airflow.providers.standard.operators.bash import BashOperator
 import pandas as pd
 import requests
 import os
+import gzip
+import shutil
 from sqlalchemy import create_engine, text
+from airflow.sdk import Variable
 import numpy as np
 
 # Default arguments for the DAG
@@ -110,12 +113,7 @@ def load_data(**context):
     
     # Database connection string (using the local postgres service from docker-compose)
     # If you want to use Supabase, ensure network connectivity and IPv4 resolution
-    stg_table_cred = {
-    'USER':'postgres.wjkkavghitommkkbdzpm', 
-    'PASSWORD':"admin",
-    'HOST':"aws-1-eu-central-2.pooler.supabase.com" ,
-    'PORT':'6543' ,
-    'DBNAME':'postgres',}
+    stg_table_cred = Variable.get("stg_db_creds", deserialize_json=True)
     db_connection_string = f"postgresql+psycopg2://{stg_table_cred['USER']}:{stg_table_cred['PASSWORD']}@{stg_table_cred['HOST']}:{stg_table_cred['PORT']}/{stg_table_cred['DBNAME']}?sslmode=require&connect_timeout=30"
     
     try:
@@ -172,19 +170,56 @@ def load_data(**context):
         raise
 
 
+def archive_parquet_file(**context):
+    """Archive the parquet file after successful load to staging"""
+    
+    file_path = context['ti'].xcom_pull(key='file_path', task_ids='extract')
+    year_month = context['ti'].xcom_pull(key='year_month', task_ids='extract')
+    
+    print(f"Archiving parquet file for {year_month}")
+    
+    try:
+        # Create archive directory if it doesn't exist
+        archive_dir = '/opt/airflow/dags/data/archive'
+        os.makedirs(archive_dir, exist_ok=True)
+        
+        # Generate archive file path with timestamp and .gz extension
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        file_name = os.path.basename(file_path)
+        archive_path = f"{archive_dir}/{file_name.replace('.parquet', f'_{timestamp}.parquet.gz')}"
+        
+        # Compress and move file to archive
+        if os.path.exists(file_path):
+            print(f"Compressing and archiving to: {archive_path}")
+            with open(file_path, 'rb') as f_in:
+                with gzip.open(archive_path, 'wb') as f_out:
+                    shutil.copyfileobj(f_in, f_out)
+            
+            # Remove original file
+            os.remove(file_path)
+            print(f"Successfully archived and compressed file to: {archive_path}")
+            
+            # Push archive path to XCom
+            context['ti'].xcom_push(key='archive_path', value=archive_path)
+            
+            return archive_path
+        else:
+            print(f"Warning: File not found at {file_path}, skipping archive")
+            return None
+            
+    except Exception as e:
+        print(f"Error archiving file: {e}")
+        # Don't raise - archiving failure shouldn't stop the pipeline
+        return None
+
+
 def check_and_create_dwh_schema(**context):
     """Check if DWH schema exists, create if not"""
     
     print("Checking Data Warehouse schema...")
     
     # Data Warehouse connection (Supabase Cloud)
-    dwh_cred = {
-        'USER': 'postgres.xgoybmnqftaiismchzhj',
-        'PASSWORD': 'nyc_data',
-        'HOST': 'aws-1-eu-north-1.pooler.supabase.com',
-        'PORT': '6543',
-        'DBNAME': 'postgres',
-    }
+    dwh_cred = Variable.get("dwh_db_creds", deserialize_json=True)
     dwh_connection_string = f"postgresql+psycopg2://{dwh_cred['USER']}:{dwh_cred['PASSWORD']}@{dwh_cred['HOST']}:{dwh_cred['PORT']}/{dwh_cred['DBNAME']}?sslmode=require&connect_timeout=30"
     
     try:
@@ -232,11 +267,24 @@ def check_and_create_dwh_schema(**context):
                 
                 # Check dimension data
                 dim_counts = {}
-                for table in ['dim_date', 'dim_vendor', 'dim_payment_type', 'dim_rate_code']:
+                for table in ['dim_date', 'dim_vendor', 'dim_payment_type', 'dim_rate_code', 'dim_location']:
                     result = conn.execute(text(f"SELECT COUNT(*) FROM {table}"))
                     count = result.scalar()
                     dim_counts[table] = count
                     print(f"  {table}: {count} records")
+                
+                # Populate dimensions if empty
+                if dim_counts.get('dim_vendor', 0) == 0 or dim_counts.get('dim_location', 0) == 0:
+                    print("Populating reference dimensions...")
+                    with open('/opt/airflow/sql/populate_dimensions.sql', 'r') as f:
+                        conn.execute(text(f.read()))
+                        
+                if dim_counts.get('dim_date', 0) == 0:
+                    print("Populating dim_date...")
+                    # Ensure helper function exists
+                    with open('/opt/airflow/sql/helper_functions.sql', 'r') as f:   
+                        conn.execute(text(f.read()))
+                    conn.execute(text("SELECT populate_dim_date('2009-01-01', '2030-12-31')"))
                 
             else:
                 print("✗ Data warehouse schema does not exist. Creating...")
@@ -276,6 +324,11 @@ def check_and_create_dwh_schema(**context):
                     conn.execute(text(helpers_sql))
                     print("✓ Helper functions created successfully")
                     
+                    # Populate Date Dimension
+                    print("Populating dim_date...")
+                    conn.execute(text("SELECT populate_dim_date('2009-01-01', '2030-12-31')"))
+                    print("✓ Date dimension populated successfully")
+                    
                     # Commit transaction
                     trans.commit()
                     
@@ -296,20 +349,20 @@ def check_and_create_dwh_schema(**context):
 def load_to_dwh(**context):
     """Transform and load data into the OLAP Data Warehouse"""
     
-    file_path = context['ti'].xcom_pull(key='file_path', task_ids='extract')
+    # Try to get the archived file path first
+    archive_path = context['ti'].xcom_pull(key='archive_path', task_ids='archive')
+    original_file_path = context['ti'].xcom_pull(key='file_path', task_ids='extract')
+    
+    # Use archive path if available, otherwise fallback to original path
+    file_path = archive_path if archive_path else original_file_path
+    
     year_month = context['ti'].xcom_pull(key='year_month', task_ids='extract')
     
     print(f"Loading data for {year_month} into Data Warehouse")
     print(f"File: {file_path}")
     
     # Data Warehouse connection (Supabase Cloud)
-    dwh_cred = {
-        'USER': 'postgres.xgoybmnqftaiismchzhj',
-        'PASSWORD': 'nyc_data',
-        'HOST': 'aws-1-eu-north-1.pooler.supabase.com',
-        'PORT': '6543',
-        'DBNAME': 'postgres',
-    }
+    dwh_cred = Variable.get("dwh_db_creds", deserialize_json=True)
     dwh_connection_string = f"postgresql+psycopg2://{dwh_cred['USER']}:{dwh_cred['PASSWORD']}@{dwh_cred['HOST']}:{dwh_cred['PORT']}/{dwh_cred['DBNAME']}?sslmode=require&connect_timeout=30"
     
     try:
@@ -328,7 +381,13 @@ def load_to_dwh(**context):
         )
         
         # Read the parquet file
-        df = pd.read_parquet(file_path)
+        # Handle compressed files if necessary
+        if file_path.endswith('.gz'):
+            print("Detected compressed file, reading with gzip...")
+            with gzip.open(file_path, 'rb') as f:
+                df = pd.read_parquet(f)
+        else:
+            df = pd.read_parquet(file_path)
         
         print(f"Transforming {len(df)} records for data warehouse...")
         
@@ -343,22 +402,33 @@ def load_to_dwh(**context):
         df['payment_type'] = df['payment_type'].fillna(-1).astype(int)
         df['passenger_count'] = df['passenger_count'].fillna(0).astype(int)
         
-        # Calculate trip duration in minutes
+        # Parse year and month from year_month string
+        target_year, target_month = map(int, year_month.split('-'))
+
+        # Convert to datetime
         df['lpep_pickup_datetime'] = pd.to_datetime(df['lpep_pickup_datetime'])
         df['lpep_dropoff_datetime'] = pd.to_datetime(df['lpep_dropoff_datetime'])
+
+        # Filter by date first to ensure we have valid dates and remove NaTs
+        df = df[
+            (df['lpep_pickup_datetime'].dt.year == target_year) &
+            (df['lpep_pickup_datetime'].dt.month == target_month)
+        ]
+
+        # Calculate trip duration in minutes
         df['trip_duration_minutes'] = (
             (df['lpep_dropoff_datetime'] - df['lpep_pickup_datetime']).dt.total_seconds() / 60
-        ).round().astype(int)
+        ).round().fillna(0).astype(int)
         
         # Extract date key (YYYYMMDD format)
         df['pickup_date_key'] = df['lpep_pickup_datetime'].dt.strftime('%Y%m%d').astype(int)
         
-        # Filter out invalid records
+        # Apply remaining filters
         df = df[
             (df['trip_distance'] > 0) & 
             (df['fare_amount'] > 0) & 
             (df['trip_duration_minutes'] > 0) &
-            (df['trip_duration_minutes'] < 1440)  # Less than 24 hours
+            (df['trip_duration_minutes'] < 1440) # Less than 24 hours
         ]
         
         print(f"After filtering: {len(df)} valid records")
@@ -410,6 +480,19 @@ def load_to_dwh(**context):
                 
                 # 3. Transform fact table data
                 print("Transforming fact table data...")
+                
+                # Ensure all required columns exist in source df, fill with 0/default if missing
+                required_cols = {
+                    'extra': 0.0, 'mta_tax': 0.0, 'tip_amount': 0.0, 'tolls_amount': 0.0, 
+                    'improvement_surcharge': 0.0, 'total_amount': 0.0, 
+                    'congestion_surcharge': 0.0, 'trip_type': -1
+                }
+                for col, default_val in required_cols.items():
+                    if col not in df.columns:
+                        df[col] = default_val
+                    else:
+                        df[col] = df[col].fillna(default_val)
+
                 fact_df = pd.DataFrame({
                     'vendor_key': df['vendor_key'],
                     'pickup_location_key': df['pickup_location_key'],
@@ -420,7 +503,17 @@ def load_to_dwh(**context):
                     'passenger_count': df['passenger_count'].astype('Int16'),
                     'trip_distance_miles': df['trip_distance'].astype(float),
                     'trip_duration_minutes': df['trip_duration_minutes'].astype('Int16'),
-                    'fare_amount': df['fare_amount'].round(2)
+                    'fare_amount': df['fare_amount'].round(2),
+                    'extra_amount': df['extra'].round(2),
+                    'mta_tax': df['mta_tax'].round(2),
+                    'tip_amount': df['tip_amount'].round(2),
+                    'tolls_amount': df['tolls_amount'].round(2),
+                    'improvement_surcharge': df['improvement_surcharge'].round(2),
+                    'total_amount': df['total_amount'].round(2),
+                    'congestion_surcharge': df['congestion_surcharge'].round(2),
+                    'trip_type': df['trip_type'].astype('Int16'),
+                    'source_file': os.path.basename(file_path),
+                    'loaded_at': datetime.now()
                 })
                 
                 # 4. Load fact table
@@ -456,6 +549,32 @@ def load_to_dwh(**context):
         
     except Exception as e:
         print(f"Error loading data to data warehouse: {e}")
+        raise
+
+
+def delete_staging_table(**context):
+    """Delete the staging table after successful load to DWH"""
+    
+    year_month = context['ti'].xcom_pull(key='year_month', task_ids='extract')
+    table_name = f'green_taxi_{year_month.replace("-", "_")}'
+    
+    print(f"Deleting staging table: {table_name}")
+    
+    # Staging database credentials
+    stg_table_cred = Variable.get("stg_db_creds", deserialize_json=True)
+    db_connection_string = f"postgresql+psycopg2://{stg_table_cred['USER']}:{stg_table_cred['PASSWORD']}@{stg_table_cred['HOST']}:{stg_table_cred['PORT']}/{stg_table_cred['DBNAME']}?sslmode=require&connect_timeout=30"
+    
+    try:
+        engine = create_engine(db_connection_string)
+        with engine.connect() as conn:
+            conn.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
+            print(f"Successfully dropped table {table_name}")
+            
+        engine.dispose()
+        return True
+        
+    except Exception as e:
+        print(f"Error deleting staging table: {e}")
         raise
 
 
@@ -496,23 +615,35 @@ with DAG(
         python_callable=load_data,
     )
     
-    # Task 5: Check/Create DWH Schema
+    # Task 5: Archive Parquet File
+    archive = PythonOperator(
+        task_id='archive',
+        python_callable=archive_parquet_file,
+    )
+    
+    # Task 6: Check/Create DWH Schema
     check_schema = PythonOperator(
         task_id='check_schema',
         python_callable=check_and_create_dwh_schema,
     )
     
-    # Task 6: Load to Data Warehouse
+    # Task 7: Load to Data Warehouse
     load_dwh = PythonOperator(
         task_id='load_dwh',
         python_callable=load_to_dwh,
     )
     
-    # Task 7: End
+    # Task 8: Delete Staging Table
+    delete_staging = PythonOperator(
+        task_id='delete_staging',
+        python_callable=delete_staging_table,
+    )
+    
+    # Task 9: End
     end = BashOperator(
         task_id='end',
         bash_command='echo "NYC Green Taxi pipeline completed for {{ ds }}!"',
     )
     
     # Define task dependencies
-    start >> extract >> validate >> load >> check_schema >> load_dwh >> end
+    start >> extract >> validate >> load >> archive >> check_schema >> load_dwh >> delete_staging >> end
