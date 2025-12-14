@@ -17,34 +17,23 @@ This project implements a complete ETL pipeline for NYC Green Taxi trip data, fe
 
 ## Architecture
 
-```
-┌─────────────────┐
-│  NYC Open Data  │
-│   (CloudFront)  │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│    Extract      │ ◄── Airflow Task
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│    Validate     │ ◄── Airflow Task
-└────────┬────────┘
-         │
-         ├──────────────────────────┐
-         ▼                          ▼
-┌─────────────────┐      ┌──────────────────┐
-│  Staging DB     │      │  Transform &     │
-│ (Local Postgres)│      │  Load to DWH     │
-└─────────────────┘      └────────┬─────────┘
-                                  ▼
-                         ┌──────────────────┐
-                         │  Data Warehouse  │
-                         │  (Star Schema)   │
-                         │   Databricks     │
-                         └──────────────────┘
+```mermaid
+graph TD
+    Source[NYC Open Data<br/>CloudFront] --> Extract[Extract Task]
+    Extract --> Validate[Validate Task]
+    Validate --> LoadStaging[Load to Staging DB]
+    Validate --> LoadDWH[Transform & Load to DWH]
+    
+    LoadStaging --> StagingDB[(Staging DB<br/>Local Postgres)]
+    LoadDWH --> DWH[(Data Warehouse<br/>Databricks<br/>Star Schema)]
+
+    classDef storage fill:#e1f5fe,stroke:#01579b,stroke-width:2px;
+    classDef process fill:#f3e5f5,stroke:#4a148c,stroke-width:2px;
+    classDef source fill:#fff3e0,stroke:#e65100,stroke-width:2px;
+
+    class Source source;
+    class Extract,Validate,LoadStaging,LoadDWH process;
+    class StagingDB,DWH storage;
 ```
 
 ## Table of Contents
@@ -705,7 +694,7 @@ TAX_BI/
 2. Clean existing data with cleanup script
 3. Recreate schema (auto-run by DAG)
 4. Test with sample data
-  
+
 ### Custom Transformations
 
 Add transformation logic in `load_to_dwh()` function:
