@@ -17,6 +17,7 @@ import shutil
 from sqlalchemy import create_engine, text
 from airflow.sdk import Variable
 import numpy as np
+import uuid
 
 # Default arguments for the DAG
 default_args = {
@@ -33,8 +34,8 @@ def extract_taxi_data(**context):
     """Extract NYC Green Taxi data from CloudFront API based on execution date"""
     
     # Get the execution date for backfilling
-    execution_date = context['ds']  # Format: YYYY-MM-DD
     logical_date = context['logical_date']  # datetime object
+    execution_date = logical_date.strftime('%Y-%m-%d')
     
     # Format the date as YYYY-MM for the API URL
     year_month = logical_date.strftime('%Y-%m')
@@ -222,131 +223,60 @@ def check_and_create_dwh_schema(**context):
     
     print("Checking Data Warehouse schema...")
     
-    # Data Warehouse connection (Supabase Cloud)
+    # Data Warehouse connection
     dwh_cred = Variable.get("dwh_db_creds", deserialize_json=True)
-    dwh_connection_string = f"postgresql+psycopg2://{dwh_cred['USER']}:{dwh_cred['PASSWORD']}@{dwh_cred['HOST']}:{dwh_cred['PORT']}/{dwh_cred['DBNAME']}?sslmode=require&connect_timeout=30"
+    
+    print("Connecting to Databricks...")
+    # Construct Databricks connection string
+    dwh_connection_string = (
+        f"databricks://token:{dwh_cred['ACCESS_TOKEN']}@"
+        f"{dwh_cred['SERVER_HOSTNAME']}?http_path={dwh_cred['HTTP_PATH']}&catalog={dwh_cred.get('CATALOG', 'hive_metastore')}&schema={dwh_cred.get('SCHEMA', 'default')}"
+    )
     
     try:
-        engine = create_engine(
-            dwh_connection_string,
-            pool_pre_ping=True,
-            pool_recycle=3600,
-            connect_args={
-                'connect_timeout': 30,
-                'keepalives': 1,
-                'keepalives_idle': 30,
-                'keepalives_interval': 10,
-                'keepalives_count': 5
-            }
-        )
-        
+        engine = create_engine(dwh_connection_string)
         with engine.connect() as conn:
-            # Check if fact_trips table exists
-            result = conn.execute(text("""
-                SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
-                    WHERE table_schema = 'public' 
-                    AND table_name = 'fact_trips'
-                );
-            """))
-            schema_exists = result.scalar()
+            # Create Schema
+            schema_name = dwh_cred.get('SCHEMA', 'default')
+            print(f"Creating schema '{schema_name}' if not exists...")
+            conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {schema_name}"))
             
-            if schema_exists:
-                print("✓ Data warehouse schema already exists")
-                
-                # Check all required tables
-                required_tables = ['dim_date', 'dim_location', 'dim_vendor', 
-                                 'dim_payment_type', 'dim_rate_code', 'fact_trips']
-                
-                for table in required_tables:
-                    result = conn.execute(text(f"""
-                        SELECT EXISTS (
-                            SELECT FROM information_schema.tables 
-                            WHERE table_schema = 'public' 
-                            AND table_name = '{table}'
-                        );
-                    """))
-                    exists = result.scalar()
-                    print(f"  {'✓' if exists else '✗'} {table}: {'exists' if exists else 'missing'}")
-                
-                # Check dimension data
-                dim_counts = {}
-                for table in ['dim_date', 'dim_vendor', 'dim_payment_type', 'dim_rate_code', 'dim_location']:
-                    result = conn.execute(text(f"SELECT COUNT(*) FROM {table}"))
-                    count = result.scalar()
-                    dim_counts[table] = count
-                    print(f"  {table}: {count} records")
-                
-                # Populate dimensions if empty
-                if dim_counts.get('dim_vendor', 0) == 0 or dim_counts.get('dim_location', 0) == 0:
-                    print("Populating reference dimensions...")
-                    with open('/opt/airflow/sql/populate_dimensions.sql', 'r') as f:
-                        conn.execute(text(f.read()))
-                        
-                if dim_counts.get('dim_date', 0) == 0:
-                    print("Populating dim_date...")
-                    # Ensure helper function exists
-                    with open('/opt/airflow/sql/helper_functions.sql', 'r') as f:   
-                        conn.execute(text(f.read()))
-                    conn.execute(text("SELECT populate_dim_date('2009-01-01', '2030-12-31')"))
-                
-            else:
-                print("✗ Data warehouse schema does not exist. Creating...")
-                
-                # Begin transaction
-                trans = conn.begin()
-                
-                try:
-                    # Read and execute schema creation script
-                    schema_sql_path = '/opt/airflow/sql/create_dwh_schema.sql'
-                    print(f"Reading schema from: {schema_sql_path}")
-                    
-                    with open(schema_sql_path, 'r') as f:
-                        schema_sql = f.read()
-                    
-                    # Execute schema creation
-                    conn.execute(text(schema_sql))
-                    print("✓ Schema created successfully")
-                    
-                    # Populate dimensions
-                    populate_sql_path = '/opt/airflow/sql/populate_dimensions.sql'
-                    print(f"Populating dimensions from: {populate_sql_path}")
-                    
-                    with open(populate_sql_path, 'r') as f:
-                        populate_sql = f.read()
-                    
-                    conn.execute(text(populate_sql))
-                    print("✓ Dimensions populated successfully")
-                    
-                    # Create helper functions
-                    helpers_sql_path = '/opt/airflow/sql/helper_functions.sql'
-                    print(f"Creating helper functions from: {helpers_sql_path}")
-                    
-                    with open(helpers_sql_path, 'r') as f:
-                        helpers_sql = f.read()
-                    
-                    conn.execute(text(helpers_sql))
-                    print("✓ Helper functions created successfully")
-                    
-                    # Populate Date Dimension
-                    print("Populating dim_date...")
-                    conn.execute(text("SELECT populate_dim_date('2009-01-01', '2030-12-31')"))
-                    print("✓ Date dimension populated successfully")
-                    
-                    # Commit transaction
-                    trans.commit()
-                    
-                except Exception as e:
-                    trans.rollback()
-                    print(f"Schema creation failed, rolled back: {e}")
-                    raise
-                
-        engine.dispose()
-        print("✓ Schema check complete")
-        return True
-        
+            # Create dim_location table if not exists (Simplified for Databricks)
+            print("Creating dim_location table if not exists...")
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS dim_location (
+                    location_key INT,
+                    location_id INT,
+                    zone_name STRING,
+                    borough STRING,
+                    is_airport BOOLEAN,
+                    is_downtown BOOLEAN,
+                    is_tourist_area BOOLEAN
+                )
+            """))
+            
+            # Create fact_trips table if not exists
+            print("Creating fact_trips table if not exists...")
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS fact_trips (
+                    trip_id STRING,
+                    vendor_key INT,
+                    pickup_location_key INT,
+                    dropoff_location_key INT,
+                    payment_type_key INT,
+                    rate_code_key INT,
+                    pickup_date_key INT,
+                    passenger_count INT,
+                    trip_distance_miles FLOAT,
+                    trip_duration_minutes INT,
+                    fare_amount FLOAT
+                )
+            """))
+            
+            print("✓ Databricks schema and tables checked/created")
+            return True
     except Exception as e:
-        print(f"Error checking/creating schema: {e}")
+        print(f"Error setting up Databricks schema: {e}")
         raise
 
 
@@ -365,24 +295,17 @@ def load_to_dwh(**context):
     print(f"Loading data for {year_month} into Data Warehouse")
     print(f"File: {file_path}")
     
-    # Data Warehouse connection (Supabase Cloud)
+    # Data Warehouse connection
     dwh_cred = Variable.get("dwh_db_creds", deserialize_json=True)
-    dwh_connection_string = f"postgresql+psycopg2://{dwh_cred['USER']}:{dwh_cred['PASSWORD']}@{dwh_cred['HOST']}:{dwh_cred['PORT']}/{dwh_cred['DBNAME']}?sslmode=require&connect_timeout=30"
+    
+    dwh_connection_string = (
+        f"databricks://token:{dwh_cred['ACCESS_TOKEN']}@"
+        f"{dwh_cred['SERVER_HOSTNAME']}?http_path={dwh_cred['HTTP_PATH']}&catalog={dwh_cred.get('CATALOG', 'hive_metastore')}&schema={dwh_cred.get('SCHEMA', 'default')}"
+    )
     
     try:
-        # Create SQLAlchemy engine with connection pooling
-        engine = create_engine(
-            dwh_connection_string,
-            pool_pre_ping=True,
-            pool_recycle=3600,
-            connect_args={
-                'connect_timeout': 30,
-                'keepalives': 1,
-                'keepalives_idle': 30,
-                'keepalives_interval': 10,
-                'keepalives_count': 5
-            }
-        )
+        # Create SQLAlchemy engine
+        engine = create_engine(dwh_connection_string)
         
         # Read the parquet file
         # Handle compressed files if necessary
@@ -448,23 +371,32 @@ def load_to_dwh(**context):
                 unique_dropoff_locations = df['DOLocationID'].unique()
                 all_locations = np.unique(np.concatenate([unique_pickup_locations, unique_dropoff_locations]))
                 
-                for loc_id in all_locations:
-                    if loc_id > 0 and loc_id not in [264, 265]:  # Skip invalid/unknown
-                        # Check if location exists (using location_key as the ID)
-                        result = conn.execute(text(
-                            "SELECT location_key FROM dim_location WHERE location_key = :loc_id"
-                        ), {"loc_id": int(loc_id)})
+                # Filter valid location IDs
+                valid_locations = [int(loc_id) for loc_id in all_locations if loc_id > 0 and loc_id not in [264, 265]]
+                
+                if valid_locations:
+                    # Get existing locations in one query
+                    location_list = ', '.join(map(str, valid_locations))
+                    result = conn.execute(text(f"SELECT location_key FROM dim_location WHERE location_key IN ({location_list})"))
+                    existing_locations = {row[0] for row in result.fetchall()}
+                    
+                    # Find missing locations
+                    missing_locations = [loc_id for loc_id in valid_locations if loc_id not in existing_locations]
+                    
+                    if missing_locations:
+                        print(f"  Inserting {len(missing_locations)} new locations...")
                         
-                        if result.fetchone() is None:
-                            # Insert new location with key = id
-                            conn.execute(text("""
-                                INSERT INTO dim_location (location_key, zone_name, borough, is_airport, is_downtown, is_tourist_area)
-                                VALUES (:key, :name, :borough, FALSE, FALSE, FALSE)
-                            """), {
-                                "key": int(loc_id),
-                                "name": f"Zone {loc_id}",
-                                "borough": "Unknown"
-                            })
+                        # Batch insert for Databricks (6 columns per row, keep batches small)
+                        batch_size = 1000
+                        for i in range(0, len(missing_locations), batch_size):
+                            batch = missing_locations[i:i + batch_size]
+                            values_list = [f"({loc_id}, 'Zone {loc_id}', 'Unknown', FALSE, FALSE, FALSE)" for loc_id in batch]
+                            insert_sql = f"INSERT INTO dim_location (location_key, zone_name, borough, is_airport, is_downtown, is_tourist_area) VALUES {', '.join(values_list)}"
+                            conn.execute(text(insert_sql))
+                        
+                        print(f"  ✓ Inserted {len(missing_locations)} new locations")
+                    else:
+                        print("  All locations already exist")
                 
                 # 2. Map source IDs to dimension keys
                 print("Creating dimension key mappings...")
@@ -497,7 +429,11 @@ def load_to_dwh(**context):
                     else:
                         df[col] = df[col].fillna(default_val)
 
+                # Generate UUID for trip_id
+                df['trip_id'] = [str(uuid.uuid4()) for _ in range(len(df))]
+
                 fact_df = pd.DataFrame({
+                    'trip_id': df['trip_id'],
                     'vendor_key': df['vendor_key'],
                     'pickup_location_key': df['pickup_location_key'],
                     'dropoff_location_key': df['dropoff_location_key'],
@@ -508,28 +444,58 @@ def load_to_dwh(**context):
                     'trip_distance_miles': df['trip_distance'].astype(float),
                     'trip_duration_minutes': df['trip_duration_minutes'].astype('Int16'),
                     'fare_amount': df['fare_amount'].round(2),
-                    'extra_amount': df['extra'].round(2),
-                    'mta_tax': df['mta_tax'].round(2),
-                    'tip_amount': df['tip_amount'].round(2),
-                    'tolls_amount': df['tolls_amount'].round(2),
-                    'improvement_surcharge': df['improvement_surcharge'].round(2),
-                    'total_amount': df['total_amount'].round(2),
-                    'congestion_surcharge': df['congestion_surcharge'].round(2),
-                    'trip_type': df['trip_type'].astype('Int16'),
-                    'source_file': os.path.basename(file_path),
-                    'loaded_at': datetime.now()
+                    
                 })
                 
                 # 4. Load fact table
                 print(f"Loading {len(fact_df)} records into fact_trips...")
-                fact_df.to_sql(
-                    name='fact_trips',
-                    con=conn,
-                    if_exists='append',
-                    index=False,
-                    chunksize=5000,
-                    method='multi'
-                )
+                
+                # Databricks has strict limits on query size/parameters
+                # Use small batches with raw SQL to stay within limits
+                # With 20 columns, ~10-12 rows per INSERT is safe
+                batch_size = 5000
+                total_rows = len(fact_df)
+                
+                print(f"Using batch insertion for Databricks ({batch_size} rows per batch, {total_rows} total)...")
+                
+                # Pre-compute column names
+                columns = ', '.join(fact_df.columns)
+                
+                def format_value(val):
+                    """Format a value for SQL INSERT statement"""
+                    if pd.isna(val):
+                        return 'NULL'
+                    elif isinstance(val, str):
+                        escaped_val = str(val).replace("'", "''")
+                        return f"'{escaped_val}'"
+                    elif isinstance(val, datetime):
+                        return f"'{val.strftime('%Y-%m-%d %H:%M:%S')}'"
+                    elif isinstance(val, (np.integer, int)):
+                        return str(int(val))
+                    elif isinstance(val, (np.floating, float)):
+                        return str(round(float(val), 2))
+                    else:
+                        return str(val)
+                
+                inserted = 0
+                for i in range(0, total_rows, batch_size):
+                    batch_df = fact_df.iloc[i:i + batch_size]
+                    
+                    # Build VALUES list
+                    values_list = []
+                    for _, row in batch_df.iterrows():
+                        row_values = ', '.join(format_value(row[col]) for col in batch_df.columns)
+                        values_list.append(f"({row_values})")
+                    
+                    insert_sql = f"INSERT INTO fact_trips ({columns}) VALUES {', '.join(values_list)}"
+                    conn.execute(text(insert_sql))
+                    inserted += len(batch_df)
+                    
+                    # Log progress every 1000 rows
+                    if inserted % 1000 == 0 or inserted >= total_rows:
+                        print(f"  Progress: {inserted}/{total_rows} rows ({100*inserted//total_rows}%)")
+                
+                print(f"✓ Completed insertion of {total_rows} rows")
                 
                 # Commit transaction
                 trans.commit()
@@ -602,7 +568,7 @@ with DAG(
     # Task 1: Start
     start = BashOperator(
         task_id='start',
-        bash_command='echo "Starting NYC Green Taxi data extraction for {{ ds }}"',
+        bash_command='echo "Starting NYC Green Taxi data extraction"',
     )
     
     # Task 2: Extract

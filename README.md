@@ -8,8 +8,8 @@ This project implements a complete ETL pipeline for NYC Green Taxi trip data, fe
 
 - **Data Extraction** from NYC CloudFront API
 - **Data Validation** and quality checks  
-- **Staging Database** for raw data storage (Supabase Cloud - EU Central)
-- **OLAP Data Warehouse** with star schema design (Supabase Cloud - EU North)
+- **Staging Database** for raw data storage (Local PostgreSQL)
+- **OLAP Data Warehouse** with star schema design (Databricks)
 - **Automated Processing** with Apache Airflow
 - **Docker-based** deployment for easy setup
 - **Backfilling Support** for historical data processing
@@ -37,13 +37,13 @@ This project implements a complete ETL pipeline for NYC Green Taxi trip data, fe
          ▼                          ▼
 ┌─────────────────┐      ┌──────────────────┐
 │  Staging DB     │      │  Transform &     │
-│  (Supabase EU)  │      │  Load to DWH     │
+│ (Local Postgres)│      │  Load to DWH     │
 └─────────────────┘      └────────┬─────────┘
                                   ▼
                          ┌──────────────────┐
                          │  Data Warehouse  │
                          │  (Star Schema)   │
-                         │  Supabase EU-N   │
+                         │   Databricks     │
                          └──────────────────┘
 ```
 
@@ -64,7 +64,7 @@ This project implements a complete ETL pipeline for NYC Green Taxi trip data, fe
 
 ## Data Warehouse Schema
 
-The OLAP data warehouse implements a **star schema** optimized for analytical queries using Supabase PostgreSQL in the cloud.
+The OLAP data warehouse implements a **star schema** optimized for analytical queries using Databricks SQL Warehouse.
 
 ### Dimension Tables
 
@@ -133,7 +133,7 @@ Key locations:
 ### Fact Table
 
 #### fact_trips - Trip Transaction Data
-- **trip_key** (PK) - Auto-increment surrogate key
+- **trip_id** (PK) - UUID string
 - vendor_key (FK → dim_vendor)
 - pickup_location_key (FK → dim_location)
 - dropoff_location_key (FK → dim_location)
@@ -154,34 +154,34 @@ Key locations:
 
 ## Cloud Infrastructure
 
-### Staging Database (Supabase EU Central 2)
+### Staging Database (Local PostgreSQL)
 **Purpose:** Stores raw extracted data before transformation
 
-- **Provider**: Supabase
-- **Region**: EU Central (Frankfurt) - `aws-1-eu-central-2`
-- **Host**: `aws-1-eu-central-2.pooler.supabase.com`
-- **Port**: `6543`
-- **Database**: `postgres`
-- **User**: `postgres.wjkkavghitommkkbdzpm`
-- **SSL Mode**: `require`
+- **Provider**: Local Docker Container
+- **Host**: `postgres` (internal Docker network)
+- **Port**: `5432`
+- **Database**: `airflow`
+- **User**: `airflow`
 
 **Tables:** `green_taxi_YYYY_MM` (one per month)
 
-### Data Warehouse (Supabase EU North 1)
+### Data Warehouse (Databricks)
 **Purpose:** OLAP analytics with star schema
 
-- **Provider**: Supabase
-- **Region**: EU North (Stockholm) - `aws-1-eu-north-1`
-- **Host**: `aws-1-eu-north-1.pooler.supabase.com`
-- **Port**: `6543`
-- **Database**: `postgres`
-- **User**: `postgres.xgoybmnqftaiismchzhj`
-- **Password**: `nyc_data`
-- **SSL Mode**: `require`
+- **Provider**: Databricks
+- **Compute**: SQL Warehouse
+- **Connection**: `databricks-sql-connector`
 
-**Connection String:**
-```
-postgresql+psycopg2://postgres.xgoybmnqftaiismchzhj:nyc_data@aws-1-eu-north-1.pooler.supabase.com:6543/postgres?sslmode=require
+**Connection Configuration:**
+Managed via Airflow Variable `dwh_db_creds` (JSON):
+```json
+{
+  "SERVER_HOSTNAME": "...",
+  "HTTP_PATH": "...",
+  "ACCESS_TOKEN": "...",
+  "CATALOG": "hive_metastore",
+  "SCHEMA": "default"
+}
 ```
 
 ### Key Design Decisions
@@ -233,7 +233,32 @@ Wait for all containers to be healthy (~2 minutes):
 docker compose ps
 ```
 
-### 4. Access Airflow UI
+### 4. Configure Credentials
+Go to **Admin > Variables** in the Airflow UI and add the following variables:
+
+**dwh_db_creds** (JSON):
+```json
+{
+  "SERVER_HOSTNAME": "your-databricks-host.cloud.databricks.com",
+  "HTTP_PATH": "/sql/1.0/warehouses/...",
+  "ACCESS_TOKEN": "dapi...",
+  "CATALOG": "hive_metastore",
+  "SCHEMA": "default"
+}
+```
+
+**stg_db_creds** (JSON):
+```json
+{
+  "USER": "airflow",
+  "PASSWORD": "airflow",
+  "HOST": "postgres",
+  "PORT": "5432",
+  "DBNAME": "airflow"
+}
+```
+
+### 5. Access Airflow UI
 - **URL**: http://localhost:8080
 - **Username**: `airflow`
 - **Password**: `airflow`
@@ -254,9 +279,9 @@ start → extract → validate → load → check_schema → load_dwh → end
 1. **start**: Initialization message
 2. **extract**: Download parquet file from NYC CloudFront API
 3. **validate**: Check data quality and record count
-4. **load**: Load raw data to Supabase staging database
+4. **load**: Load raw data to Local staging database
 5. **check_schema**: Verify DWH schema exists (create if missing)
-6. **load_dwh**: Transform and load to cloud data warehouse
+6. **load_dwh**: Transform and load to Databricks data warehouse
 7. **end**: Completion message
 
 ### DAG Settings
@@ -328,16 +353,18 @@ watch -n 10 'docker compose exec airflow-apiserver airflow dags list-runs nyc_gr
 
 ```bash
 docker compose exec airflow-worker python -c "
-from sqlalchemy import create_engine, text
-dwh = 'postgresql+psycopg2://postgres.xgoybmnqftaiismchzhj:nyc_data@aws-1-eu-north-1.pooler.supabase.com:6543/postgres?sslmode=require'
-engine = create_engine(dwh, pool_pre_ping=True)
-with engine.connect() as conn:
-    result = conn.execute(text('SELECT COUNT(*) FROM fact_trips'))
-    print(f'Total Records: {result.scalar():,}')
-    result = conn.execute(text('SELECT MIN(pickup_date_key), MAX(pickup_date_key) FROM fact_trips'))
-    min_date, max_date = result.fetchone()
-    print(f'Date Range: {min_date} → {max_date}')
-engine.dispose()
+from airflow.models import Variable
+from databricks import sql
+
+creds = Variable.get('dwh_db_creds', deserialize_json=True)
+with sql.connect(
+    server_hostname=creds['SERVER_HOSTNAME'],
+    http_path=creds['HTTP_PATH'],
+    access_token=creds['ACCESS_TOKEN']
+) as connection:
+    with connection.cursor() as cursor:
+        cursor.execute('SELECT COUNT(*) FROM fact_trips')
+        print(f'Total Records: {cursor.fetchone()[0]:,}')
 "
 ```
 
@@ -447,13 +474,13 @@ Location: `sql/` directory
 The DAG automatically manages schema creation:
 
 #### `check_and_create_dwh_schema()`
-- Connects to Supabase cloud database
+- Connects to Databricks SQL Warehouse
 - Checks if schema exists
 - Creates schema if missing
 - Populates dimensions on first run
 
 #### `load_to_dwh()`
-- Connects to Supabase cloud database with SSL
+- Connects to Databricks SQL Warehouse
 - Maps source IDs to dimension keys directly
 - Auto-creates missing locations
 - Loads fact table with proper foreign keys
@@ -678,7 +705,7 @@ TAX_BI/
 2. Clean existing data with cleanup script
 3. Recreate schema (auto-run by DAG)
 4. Test with sample data
-
+  
 ### Custom Transformations
 
 Add transformation logic in `load_to_dwh()` function:
@@ -709,7 +736,7 @@ df['custom_metric'] = df['fare_amount'] / df['trip_distance']
 
 - [NYC Taxi Data](https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page)
 - [Apache Airflow Docs](https://airflow.apache.org/docs/)
-- [Supabase Docs](https://supabase.com/docs)
+- [Databricks Docs](https://docs.databricks.com/)
 - [Star Schema Design](https://en.wikipedia.org/wiki/Star_schema)
 
 ---
@@ -719,7 +746,7 @@ df['custom_metric'] = df['fare_amount'] / df['trip_distance']
 **Setup:**
 - Initial setup: 15-30 minutes
 - First data load: 5-10 minutes
-- Full historical backfill: 8-10 hours
+- Full historical backfill: 1-2 hours
 
 **Maintenance:**
 - Pipeline: Automated (monthly)

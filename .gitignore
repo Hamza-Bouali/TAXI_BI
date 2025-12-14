@@ -18,6 +18,6 @@ dags/data/*
 *.md
 
 !README.md
-
+variables.json
 
 superset

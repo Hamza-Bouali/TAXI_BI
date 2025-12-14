@@ -10,10 +10,9 @@ SELECT
     d.day_name,
     d.is_weekend,
     COUNT(f.trip_id) as total_trips,
-    SUM(f.total_amount) as daily_revenue,
-    AVG(f.total_amount) as avg_fare,
-    AVG(f.trip_distance_miles) as avg_distance,
-    AVG(f.tip_amount) as avg_tip
+    SUM(f.fare_amount) as daily_revenue,
+    AVG(f.fare_amount) as avg_fare,
+    AVG(f.trip_distance_miles) as avg_distance
 FROM fact_trips f
 JOIN dim_date d ON f.pickup_date_key = d.date_key
 WHERE d.year = 2024
@@ -25,10 +24,9 @@ SELECT
     d.is_weekend,
     CASE WHEN d.is_weekend THEN 'Weekend' ELSE 'Weekday' END as day_type,
     COUNT(f.trip_id) as total_trips,
-    SUM(f.total_amount) as total_revenue,
-    AVG(f.total_amount) as avg_fare,
-    AVG(f.trip_duration_minutes) as avg_duration,
-    AVG(f.tip_amount) as avg_tip
+    SUM(f.fare_amount) as total_revenue,
+    AVG(f.fare_amount) as avg_fare,
+    AVG(f.trip_duration_minutes) as avg_duration
 FROM fact_trips f
 JOIN dim_date d ON f.pickup_date_key = d.date_key
 GROUP BY d.is_weekend
@@ -40,7 +38,7 @@ SELECT
     d.month,
     TO_CHAR(d.full_date, 'Month') as month_name,
     COUNT(f.trip_id) as total_trips,
-    SUM(f.total_amount) as total_revenue,
+    SUM(f.fare_amount) as total_revenue,
     AVG(f.trip_distance_miles) as avg_distance,
     SUM(f.passenger_count) as total_passengers
 FROM fact_trips f
@@ -52,8 +50,8 @@ ORDER BY d.year, d.month;
 SELECT 
     d.season,
     COUNT(f.trip_id) as total_trips,
-    SUM(f.total_amount) as total_revenue,
-    AVG(f.total_amount) as avg_fare,
+    SUM(f.fare_amount) as total_revenue,
+    AVG(f.fare_amount) as avg_fare,
     AVG(f.trip_distance_miles) as avg_distance
 FROM fact_trips f
 JOIN dim_date d ON f.pickup_date_key = d.date_key
@@ -69,9 +67,9 @@ SELECT
     l.zone_name,
     l.borough,
     COUNT(f.trip_id) as total_pickups,
-    SUM(f.total_amount) as total_revenue,
+    SUM(f.fare_amount) as total_revenue,
     AVG(f.trip_distance_miles) as avg_trip_distance,
-    AVG(f.total_amount) as avg_fare
+    AVG(f.fare_amount) as avg_fare
 FROM fact_trips f
 JOIN dim_location l ON f.pickup_location_key = l.location_key
 WHERE l.location_id > 0
@@ -84,7 +82,7 @@ SELECT
     l.zone_name,
     l.borough,
     COUNT(f.trip_id) as total_dropoffs,
-    SUM(f.total_amount) as total_revenue
+    SUM(f.fare_amount) as total_revenue
 FROM fact_trips f
 JOIN dim_location l ON f.dropoff_location_key = l.location_key
 WHERE l.location_id > 0
@@ -100,7 +98,7 @@ SELECT
     dl.borough as dropoff_borough,
     COUNT(f.trip_id) as trip_count,
     AVG(f.trip_distance_miles) as avg_distance,
-    AVG(f.total_amount) as avg_fare,
+    AVG(f.fare_amount) as avg_fare,
     AVG(f.trip_duration_minutes) as avg_duration
 FROM fact_trips f
 JOIN dim_location pl ON f.pickup_location_key = pl.location_key
@@ -119,7 +117,7 @@ SELECT
         ELSE 'Non-Airport'
     END as trip_type,
     COUNT(f.trip_id) as total_trips,
-    AVG(f.total_amount) as avg_fare,
+    AVG(f.fare_amount) as avg_fare,
     AVG(f.trip_distance_miles) as avg_distance,
     AVG(f.trip_duration_minutes) as avg_duration
 FROM fact_trips f
@@ -143,31 +141,14 @@ SELECT
     pt.is_electronic,
     COUNT(f.trip_id) as total_trips,
     ROUND(COUNT(f.trip_id)::NUMERIC * 100.0 / SUM(COUNT(f.trip_id)) OVER (), 2) as percentage,
-    SUM(f.total_amount) as total_revenue,
-    AVG(f.total_amount) as avg_fare,
-    AVG(f.tip_amount) as avg_tip
+    SUM(f.fare_amount) as total_revenue,
+    AVG(f.fare_amount) as avg_fare
 FROM fact_trips f
 JOIN dim_payment_type pt ON f.payment_type_key = pt.payment_type_key
 GROUP BY pt.payment_name, pt.is_electronic
 ORDER BY total_trips DESC;
 
--- 10. Tipping behavior by payment type
-SELECT 
-    pt.payment_name,
-    COUNT(f.trip_id) as total_trips,
-    AVG(f.fare_amount) as avg_fare,
-    AVG(f.tip_amount) as avg_tip,
-    CASE 
-        WHEN AVG(f.fare_amount) > 0 
-        THEN ROUND(AVG(f.tip_amount) / AVG(f.fare_amount) * 100, 2)
-        ELSE 0
-    END as avg_tip_percentage,
-    SUM(CASE WHEN f.tip_amount > 0 THEN 1 ELSE 0 END) as trips_with_tip,
-    ROUND(SUM(CASE WHEN f.tip_amount > 0 THEN 1 ELSE 0 END)::NUMERIC * 100.0 / COUNT(f.trip_id), 2) as tip_rate_percentage
-FROM fact_trips f
-JOIN dim_payment_type pt ON f.payment_type_key = pt.payment_type_key
-GROUP BY pt.payment_name
-ORDER BY avg_tip_percentage DESC;
+-- 10. Tipping behavior by payment type (REMOVED as tip_amount is no longer in fact table)
 
 -- =====================================================
 -- VENDOR ANALYSIS
@@ -177,8 +158,8 @@ ORDER BY avg_tip_percentage DESC;
 SELECT 
     v.vendor_name,
     COUNT(f.trip_id) as total_trips,
-    SUM(f.total_amount) as total_revenue,
-    AVG(f.total_amount) as avg_fare,
+    SUM(f.fare_amount) as total_revenue,
+    AVG(f.fare_amount) as avg_fare,
     AVG(f.trip_distance_miles) as avg_distance,
     AVG(f.trip_duration_minutes) as avg_duration,
     AVG(f.passenger_count) as avg_passengers
@@ -197,7 +178,7 @@ SELECT
     rc.rate_code_desc,
     COUNT(f.trip_id) as total_trips,
     ROUND(COUNT(f.trip_id)::NUMERIC * 100.0 / SUM(COUNT(f.trip_id)) OVER (), 2) as percentage,
-    AVG(f.total_amount) as avg_fare,
+    AVG(f.fare_amount) as avg_fare,
     AVG(f.trip_distance_miles) as avg_distance
 FROM fact_trips f
 JOIN dim_rate_code rc ON f.rate_code_key = rc.rate_code_key
@@ -213,7 +194,7 @@ SELECT
     f.passenger_count,
     COUNT(f.trip_id) as total_trips,
     ROUND(COUNT(f.trip_id)::NUMERIC * 100.0 / SUM(COUNT(f.trip_id)) OVER (), 2) as percentage,
-    AVG(f.total_amount) as avg_fare,
+    AVG(f.fare_amount) as avg_fare,
     AVG(f.trip_distance_miles) as avg_distance
 FROM fact_trips f
 WHERE f.passenger_count > 0
@@ -224,27 +205,15 @@ ORDER BY f.passenger_count;
 -- REVENUE ANALYSIS
 -- =====================================================
 
--- 14. Revenue breakdown by component
-SELECT 
-    COUNT(f.trip_id) as total_trips,
-    SUM(f.fare_amount) as total_base_fare,
-    SUM(f.extra_amount) as total_extra,
-    SUM(f.mta_tax) as total_mta_tax,
-    SUM(f.tip_amount) as total_tips,
-    SUM(f.tolls_amount) as total_tolls,
-    SUM(f.improvement_surcharge) as total_improvement_surcharge,
-    SUM(f.congestion_surcharge) as total_congestion_surcharge,
-    SUM(f.total_amount) as total_revenue,
-    ROUND(SUM(f.tip_amount) / NULLIF(SUM(f.total_amount), 0) * 100, 2) as tip_percentage_of_total
-FROM fact_trips f;
+-- 14. Revenue breakdown by component (REMOVED as components are no longer in fact table)
 
 -- 15. Top revenue generating days
 SELECT 
     d.full_date,
     d.day_name,
     COUNT(f.trip_id) as total_trips,
-    SUM(f.total_amount) as daily_revenue,
-    AVG(f.total_amount) as avg_fare
+    SUM(f.fare_amount) as daily_revenue,
+    AVG(f.fare_amount) as avg_fare
 FROM fact_trips f
 JOIN dim_date d ON f.pickup_date_key = d.date_key
 GROUP BY d.full_date, d.day_name
@@ -264,11 +233,11 @@ SELECT
         ELSE '10+ miles'
     END as distance_category,
     COUNT(f.trip_id) as total_trips,
-    AVG(f.total_amount / NULLIF(f.trip_distance_miles, 0)) as revenue_per_mile,
-    AVG(f.total_amount / NULLIF(f.trip_duration_minutes, 0)) as revenue_per_minute,
+    AVG(f.fare_amount / NULLIF(f.trip_distance_miles, 0)) as revenue_per_mile,
+    AVG(f.fare_amount / NULLIF(f.trip_duration_minutes, 0)) as revenue_per_minute,
     AVG(f.trip_distance_miles) as avg_distance,
     AVG(f.trip_duration_minutes) as avg_duration,
-    AVG(f.total_amount) as avg_fare
+    AVG(f.fare_amount) as avg_fare
 FROM fact_trips f
 WHERE f.trip_distance_miles > 0 AND f.trip_duration_minutes > 0
 GROUP BY 
@@ -296,8 +265,8 @@ WITH monthly_metrics AS (
         d.year,
         d.month,
         COUNT(f.trip_id) as trips,
-        SUM(f.total_amount) as revenue,
-        AVG(f.total_amount) as avg_fare,
+        SUM(f.fare_amount) as revenue,
+        AVG(f.fare_amount) as avg_fare,
         AVG(f.trip_distance_miles) as avg_distance
     FROM fact_trips f
     JOIN dim_date d ON f.pickup_date_key = d.date_key
