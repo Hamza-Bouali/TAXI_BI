@@ -27,18 +27,11 @@ graph TD
     CheckSchema --> LoadDWH[Transform & Load to DWH]
     LoadDWH --> Cleanup[Delete Staging Table]
     
-    LoadStaging --> StagingDB[(Staging DB<br/>Local Postgres)]
     LoadDWH --> DWH[(Data Warehouse<br/>Databricks<br/>Star Schema)]
     Archive --> LocalStorage[Local Archive]
     Cleanup -.-> StagingDB
 
-    classDef storage fill:#e1f5fe,stroke:#01579b,stroke-width:2px;
-    classDef process fill:#f3e5f5,stroke:#4a148c,stroke-width:2px;
-    classDef source fill:#fff3e0,stroke:#e65100,stroke-width:2px;
-
-    class Source source;
-    class Extract,Validate,LoadStaging,Archive,CheckSchema,LoadDWH,Cleanup process;
-    class StagingDB,DWH,LocalStorage storage;
+    
 ```
 
 ## Table of Contents
