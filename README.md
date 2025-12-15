@@ -29,7 +29,6 @@ graph TD
     
     LoadDWH --> DWH[(Data Warehouse<br/>Databricks<br/>Star Schema)]
     Archive --> LocalStorage[Local Archive]
-    Cleanup -.-> StagingDB
 
     
 ```
