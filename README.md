@@ -30,6 +30,11 @@ graph TD
     LoadDWH --> DWH[(Data Warehouse<br/>Databricks<br/>Star Schema)]
     Archive --> LocalStorage[Local Archive]
 
+
+    class Source source;
+    class Extract,Validate,LoadStaging,Archive,CheckSchema,LoadDWH,Cleanup process;
+    class StagingDB,DWH,LocalStorage storage;
+
     
 ```
 
