@@ -22,18 +22,23 @@ graph TD
     Source[NYC Open Data<br/>CloudFront] --> Extract[Extract Task]
     Extract --> Validate[Validate Task]
     Validate --> LoadStaging[Load to Staging DB]
-    Validate --> LoadDWH[Transform & Load to DWH]
+    LoadStaging --> Archive[Archive File]
+    Archive --> CheckSchema[Check DWH Schema]
+    CheckSchema --> LoadDWH[Transform & Load to DWH]
+    LoadDWH --> Cleanup[Delete Staging Table]
     
     LoadStaging --> StagingDB[(Staging DB<br/>Local Postgres)]
     LoadDWH --> DWH[(Data Warehouse<br/>Databricks<br/>Star Schema)]
+    Archive --> LocalStorage[Local Archive]
+    Cleanup -.-> StagingDB
 
     classDef storage fill:#e1f5fe,stroke:#01579b,stroke-width:2px;
     classDef process fill:#f3e5f5,stroke:#4a148c,stroke-width:2px;
     classDef source fill:#fff3e0,stroke:#e65100,stroke-width:2px;
 
     class Source source;
-    class Extract,Validate,LoadStaging,LoadDWH process;
-    class StagingDB,DWH storage;
+    class Extract,Validate,LoadStaging,Archive,CheckSchema,LoadDWH,Cleanup process;
+    class StagingDB,DWH,LocalStorage storage;
 ```
 
 ## Table of Contents
@@ -262,16 +267,18 @@ Navigate to DAGs and look for `nyc_green_taxi_pipeline`
 ### Pipeline Tasks
 
 ```
-start → extract → validate → load → check_schema → load_dwh → end
+start → extract → validate → load → archive → check_schema → load_dwh → delete_staging → end
 ```
 
 1. **start**: Initialization message
 2. **extract**: Download parquet file from NYC CloudFront API
 3. **validate**: Check data quality and record count
 4. **load**: Load raw data to Local staging database
-5. **check_schema**: Verify DWH schema exists (create if missing)
-6. **load_dwh**: Transform and load to Databricks data warehouse
-7. **end**: Completion message
+5. **archive**: Archive the parquet file locally
+6. **check_schema**: Verify DWH schema exists (create if missing)
+7. **load_dwh**: Transform and load to Databricks data warehouse
+8. **delete_staging**: Clean up staging table
+9. **end**: Completion message
 
 ### DAG Settings
 
