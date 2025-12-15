@@ -60,22 +60,35 @@ The OLAP data warehouse implements a **star schema** optimized for analytical qu
 ### Dimension Tables
 
 #### 1. dim_date - Time Dimension
-- **date_key** (PK) - Format: YYYYMMDD (e.g., 20240115)
-- full_date
-- year, quarter, month, day
-- day_of_week (0=Sunday, 6=Saturday)
-- day_name
-- is_weekend, is_holiday
-- season (Winter/Spring/Summer/Fall)
+
+| Column | Type | Description |
+|--------|------|-------------|
+| **date_key** (PK) | INT | Format: YYYYMMDD (e.g., 20240115) |
+| full_date | DATE | Full date value |
+| year | INT | Year part |
+| quarter | INT | Quarter (1-4) |
+| month | INT | Month (1-12) |
+| day | INT | Day of month (1-31) |
+| day_of_week | INT | 0=Sunday, 6=Saturday |
+| day_name | STRING | Name of the day (e.g., Monday) |
+| is_weekend | BOOLEAN | True if Saturday or Sunday |
+| is_holiday | BOOLEAN | True if public holiday |
+| season | STRING | Winter, Spring, Summer, Fall |
 
 **Records**: 4,383 (2019-01-01 to 2030-12-31)
 
 #### 2. dim_location - Geographic Dimension
-- **location_key** (PK) - Matches NYC location IDs
-- zone_name
-- borough
-- is_airport, is_downtown, is_tourist_area
-- latitude, longitude
+
+| Column | Type | Description |
+|--------|------|-------------|
+| **location_key** (PK) | INT | Matches NYC location IDs |
+| zone_name | STRING | Name of the zone |
+| borough | STRING | Borough name |
+| is_airport | BOOLEAN | True if location is an airport |
+| is_downtown | BOOLEAN | True if location is downtown |
+| is_tourist_area | BOOLEAN | True if location is a tourist area |
+| latitude | FLOAT | Approximate latitude |
+| longitude | FLOAT | Approximate longitude |
 
 **Records**: 27+ (grows as new locations are encountered)
 
@@ -85,9 +98,12 @@ Key locations:
 - Business districts: Midtown Center (161), Penn Station (186)
 
 #### 3. dim_vendor - Vendor Dimension
-- **vendor_key** (PK) - Surrogate key (1, 2, -1)
-- vendor_name
-- is_active
+
+| Column | Type | Description |
+|--------|------|-------------|
+| **vendor_key** (PK) | INT | Surrogate key (1, 2, -1) |
+| vendor_name | STRING | Name of the vendor |
+| is_active | BOOLEAN | True if vendor is currently active |
 
 **Records**: 3
 - 1: Creative Mobile Technologies
@@ -95,9 +111,12 @@ Key locations:
 - -1: Unknown
 
 #### 4. dim_payment_type - Payment Method Dimension
-- **payment_type_key** (PK) - Surrogate key (1-6, -1)
-- payment_name
-- is_electronic
+
+| Column | Type | Description |
+|--------|------|-------------|
+| **payment_type_key** (PK) | INT | Surrogate key (1-6, -1) |
+| payment_name | STRING | Description of payment method |
+| is_electronic | BOOLEAN | True if payment is electronic |
 
 **Records**: 7
 - 1: Credit card (electronic)
@@ -109,8 +128,11 @@ Key locations:
 - -1: Unknown
 
 #### 5. dim_rate_code - Rate Code Dimension
-- **rate_code_key** (PK) - Surrogate key (1-6, -1)
-- rate_code_desc
+
+| Column | Type | Description |
+|--------|------|-------------|
+| **rate_code_key** (PK) | INT | Surrogate key (1-6, -1) |
+| rate_code_desc | STRING | Description of rate code |
 
 **Records**: 7
 - 1: Standard rate
@@ -124,17 +146,20 @@ Key locations:
 ### Fact Table
 
 #### fact_trips - Trip Transaction Data
-- **trip_id** (PK) - UUID string
-- vendor_key (FK → dim_vendor)
-- pickup_location_key (FK → dim_location)
-- dropoff_location_key (FK → dim_location)
-- payment_type_key (FK → dim_payment_type)
-- rate_code_key (FK → dim_rate_code)
-- pickup_date_key (FK → dim_date)
-- passenger_count
-- trip_distance_miles
-- trip_duration_minutes
-- fare_amount
+
+| Column | Type | Description |
+|--------|------|-------------|
+| **trip_id** (PK) | STRING | UUID string |
+| vendor_key | INT | FK → dim_vendor |
+| pickup_location_key | INT | FK → dim_location |
+| dropoff_location_key | INT | FK → dim_location |
+| payment_type_key | INT | FK → dim_payment_type |
+| rate_code_key | INT | FK → dim_rate_code |
+| pickup_date_key | INT | FK → dim_date |
+| passenger_count | INT | Number of passengers |
+| trip_distance_miles | FLOAT | Trip distance in miles |
+| trip_duration_minutes | INT | Trip duration in minutes |
+| fare_amount | FLOAT | Fare amount in USD |
 
 **Key Features:**
 - Foreign key constraints ensure referential integrity
