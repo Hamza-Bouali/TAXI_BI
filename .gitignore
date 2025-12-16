@@ -19,5 +19,5 @@ dags/data/*
 
 !README.md
 variables.json
-
+*pem*
 superset
