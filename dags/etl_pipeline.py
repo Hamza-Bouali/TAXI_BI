@@ -247,12 +247,93 @@ def check_and_create_dwh_schema(**context):
             print(f"Creating schema '{schema_name}' if not exists...")
             conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {schema_name}"))
             
-            # Create dim_location table if not exists (Simplified for Databricks)
+            # Create dim_vendor table if not exists
+            print("Creating dim_vendor table if not exists...")
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS dim_vendor (
+                    vendor_key INT,
+                    vendor_name STRING,
+                    is_active BOOLEAN
+                )
+            """))
+            
+            # Populate dim_vendor if empty
+            result = conn.execute(text("SELECT COUNT(*) FROM dim_vendor"))
+            vendor_count = result.scalar()
+            if vendor_count == 0:
+                print("Populating dim_vendor...")
+                conn.execute(text("""
+                    INSERT INTO dim_vendor (vendor_key, vendor_name, is_active) VALUES
+                    (1, 'Creative Mobile Technologies', TRUE),
+                    (2, 'VeriFone Inc.', TRUE),
+                    (-1, 'Unknown', FALSE)
+                """))
+                print("✓ Inserted 3 vendor records")
+            else:
+                print(f"  dim_vendor already populated with {vendor_count} records")
+            
+            # Create dim_payment_type table if not exists
+            print("Creating dim_payment_type table if not exists...")
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS dim_payment_type (
+                    payment_type_key INT,
+                    payment_name STRING,
+                    is_electronic BOOLEAN
+                )
+            """))
+            
+            # Populate dim_payment_type if empty
+            result = conn.execute(text("SELECT COUNT(*) FROM dim_payment_type"))
+            payment_count = result.scalar()
+            if payment_count == 0:
+                print("Populating dim_payment_type...")
+                conn.execute(text("""
+                    INSERT INTO dim_payment_type (payment_type_key, payment_name, is_electronic) VALUES
+                    (1, 'Credit card', TRUE),
+                    (2, 'Cash', FALSE),
+                    (3, 'No charge', FALSE),
+                    (4, 'Dispute', FALSE),
+                    (5, 'Unknown', FALSE),
+                    (6, 'Voided trip', FALSE),
+                    (-1, 'Unknown', FALSE)
+                """))
+                print("✓ Inserted 7 payment type records")
+            else:
+                print(f"  dim_payment_type already populated with {payment_count} records")
+            
+            # Create dim_rate_code table if not exists
+            print("Creating dim_rate_code table if not exists...")
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS dim_rate_code (
+                    rate_code_key INT,
+                    rate_code_desc STRING
+                )
+            """))
+            
+            # Populate dim_rate_code if empty
+            result = conn.execute(text("SELECT COUNT(*) FROM dim_rate_code"))
+            rate_count = result.scalar()
+            if rate_count == 0:
+                print("Populating dim_rate_code...")
+                conn.execute(text("""
+                    INSERT INTO dim_rate_code (rate_code_key, rate_code_desc) VALUES
+                    (1, 'Standard rate'),
+                    (2, 'JFK'),
+                    (3, 'Newark'),
+                    (4, 'Nassau or Westchester'),
+                    (5, 'Negotiated fare'),
+                    (6, 'Group ride'),
+                    (-1, 'Unknown')
+                """))
+                print("✓ Inserted 7 rate code records")
+            else:
+                print(f"  dim_rate_code already populated with {rate_count} records")
+            
+            # Create dim_location table if not exists
             print("Creating dim_location table if not exists...")
             conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS dim_location (
                     location_key INT,
-                    location_id INT,
                     zone_name STRING,
                     borough STRING,
                     is_airport BOOLEAN,
@@ -260,6 +341,81 @@ def check_and_create_dwh_schema(**context):
                     is_tourist_area BOOLEAN
                 )
             """))
+            
+            # Create dim_date table if not exists
+            print("Creating dim_date table if not exists...")
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS dim_date (
+                    date_key INT,
+                    full_date DATE,
+                    year INT,
+                    quarter INT,
+                    month INT,
+                    day INT,
+                    day_of_week INT,
+                    day_name STRING,
+                    month_name STRING,
+                    is_weekend BOOLEAN,
+                    is_holiday BOOLEAN,
+                    season STRING
+                )
+            """))
+            
+            # Populate dim_date if empty (2018-2030)
+            result = conn.execute(text("SELECT COUNT(*) FROM dim_date"))
+            date_count = result.scalar()
+            if date_count == 0:
+                print("Populating dim_date with dates from 2018-01-01 to 2030-12-31...")
+                import pandas as pd
+                
+                # Generate date range
+                date_range = pd.date_range(start='2018-01-01', end='2030-12-31', freq='D')
+                date_records = []
+                
+                day_names = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+                month_names = ['January', 'February', 'March', 'April', 'May', 'June',
+                              'July', 'August', 'September', 'October', 'November', 'December']
+                
+                for date in date_range:
+                    date_key = int(date.strftime('%Y%m%d'))
+                    year = date.year
+                    quarter = (date.month - 1) // 3 + 1
+                    month = date.month
+                    day = date.day
+                    day_of_week = date.weekday()  # 0=Monday, 6=Sunday
+                    day_name = day_names[day_of_week]
+                    month_name = month_names[month - 1]
+                    is_weekend = day_of_week >= 5
+                    
+                    # Determine season (Northern Hemisphere)
+                    if month in [12, 1, 2]:
+                        season = 'Winter'
+                    elif month in [3, 4, 5]:
+                        season = 'Spring'
+                    elif month in [6, 7, 8]:
+                        season = 'Summer'
+                    else:
+                        season = 'Fall'
+                    
+                    is_holiday = False  # Can be enhanced with actual holiday data
+                    
+                    date_records.append(
+                        f"({date_key}, '{date.strftime('%Y-%m-%d')}', {year}, {quarter}, {month}, {day}, "
+                        f"{day_of_week}, '{day_name}', '{month_name}', {is_weekend}, {is_holiday}, '{season}')"
+                    )
+                
+                # Insert in batches
+                batch_size = 1000
+                for i in range(0, len(date_records), batch_size):
+                    batch = date_records[i:i + batch_size]
+                    insert_sql = (f"INSERT INTO dim_date (date_key, full_date, year, quarter, month, day, "
+                                 f"day_of_week, day_name, month_name, is_weekend, is_holiday, season) "
+                                 f"VALUES {', '.join(batch)}")
+                    conn.execute(text(insert_sql))
+                
+                print(f"✓ Inserted {len(date_records)} date records")
+            else:
+                print(f"  dim_date already populated with {date_count} records")
             
             # Create dim_time table if not exists
             print("Creating dim_time table if not exists...")
@@ -345,10 +501,10 @@ def check_and_create_dwh_schema(**context):
             """))
             
             print("✓ Databricks schema and tables checked/created")
-            return True
+            return True         
     except Exception as e:
         print(f"Error setting up Databricks schema: {e}")
-        raise
+        raise   
 
 
 def load_to_dwh(**context):
@@ -535,12 +691,27 @@ def load_to_dwh(**context):
                     
                 })
                 
-                # 4. Load fact table
+                # 4. Check if data for this month already exists
+                print("Checking for existing data...")
+                # Extract year and month from year_month (e.g., "2024-01" -> 202401)
+                year_month_key_prefix = year_month.replace('-', '')
+                check_sql = f"SELECT COUNT(*) FROM fact_trips WHERE pickup_date_key >= {year_month_key_prefix}01 AND pickup_date_key <= {year_month_key_prefix}31"
+                result = conn.execute(text(check_sql))
+                existing_count = result.scalar()
+                
+                if existing_count > 0:
+                    print(f"⚠️  Data for {year_month} already exists ({existing_count} records)")
+                    print(f"Skipping insertion to avoid duplicates")
+                    context['ti'].xcom_push(key='dwh_record_count', value=0)
+                    context['ti'].xcom_push(key='skipped_duplicate', value=True)
+                    trans.commit()
+                    engine.dispose()
+                    return 0
+                
+                # 5. Load fact table
                 print(f"Loading {len(fact_df)} records into fact_trips...")
                 
-                # Databricks has strict limits on query size/parameters
-                # Use small batches with raw SQL to stay within limits
-                # With 20 columns, ~10-12 rows per INSERT is safe
+                
                 batch_size = 5000
                 total_rows = len(fact_df)
                 
