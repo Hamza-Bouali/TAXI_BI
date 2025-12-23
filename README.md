@@ -59,23 +59,21 @@ The OLAP data warehouse implements a **star schema** optimized for analytical qu
 
 ### Dimension Tables
 
-#### 1. dim_date - Time Dimension
+#### 1. dim_time - Time of Day Dimension
 
 | Column | Type | Description |
 |--------|------|-------------|
-| **date_key** (PK) | INT | Format: YYYYMMDD (e.g., 20240115) |
-| full_date | DATE | Full date value |
-| year | INT | Year part |
-| quarter | INT | Quarter (1-4) |
-| month | INT | Month (1-12) |
-| day | INT | Day of month (1-31) |
-| day_of_week | INT | 0=Sunday, 6=Saturday |
-| day_name | STRING | Name of the day (e.g., Monday) |
-| is_weekend | BOOLEAN | True if Saturday or Sunday |
-| is_holiday | BOOLEAN | True if public holiday |
-| season | STRING | Winter, Spring, Summer, Fall |
+| **time_key** (PK) | INT | Format: HHMM (e.g., 0830, 1745) |
+| hour | INT | Hour (0-23) |
+| minute | INT | Minute (0, 15, 30, 45) |
+| time_of_day | STRING | Morning, Afternoon, Evening, Night |
+| is_business_hours | BOOLEAN | True if 9 AM - 5 PM |
+| is_rush_hour | BOOLEAN | True if 7-9 AM or 5-7 PM |
+| hour_12 | INT | 12-hour format (1-12) |
+| am_pm | STRING | AM or PM |
 
-**Records**: 4,383 (2019-01-01 to 2030-12-31)
+**Records**: 96 (24 hours × 4 quarter-hours)
+**Auto-populated**: Created automatically by `check_schema` task on first run
 
 #### 2. dim_location - Geographic Dimension
 
@@ -87,8 +85,6 @@ The OLAP data warehouse implements a **star schema** optimized for analytical qu
 | is_airport | BOOLEAN | True if location is an airport |
 | is_downtown | BOOLEAN | True if location is downtown |
 | is_tourist_area | BOOLEAN | True if location is a tourist area |
-| latitude | FLOAT | Approximate latitude |
-| longitude | FLOAT | Approximate longitude |
 
 **Records**: 27+ (grows as new locations are encountered)
 
@@ -155,7 +151,9 @@ Key locations:
 | dropoff_location_key | INT | FK → dim_location |
 | payment_type_key | INT | FK → dim_payment_type |
 | rate_code_key | INT | FK → dim_rate_code |
-| pickup_date_key | INT | FK → dim_date |
+| pickup_date_key | INT | Date in YYYYMMDD format |
+| pickup_time_key | INT | FK → dim_time (pickup time) |
+| dropoff_time_key | INT | FK → dim_time (dropoff time) |
 | passenger_count | INT | Number of passengers |
 | trip_distance_miles | FLOAT | Trip distance in miles |
 | trip_duration_minutes | INT | Trip duration in minutes |
@@ -192,13 +190,16 @@ Key locations:
 Managed via Airflow Variable `dwh_db_creds` (JSON):
 ```json
 {
-  "SERVER_HOSTNAME": "...",
-  "HTTP_PATH": "...",
-  "ACCESS_TOKEN": "...",
+  "SERVER_HOSTNAME": "your-workspace.cloud.databricks.com",
+  "HTTP_PATH": "/sql/1.0/warehouses/your_warehouse_id",
+  "ACCESS_TOKEN": "dapi...",
   "CATALOG": "hive_metastore",
   "SCHEMA": "default"
 }
 ```
+
+**⚠️ Required Fields**: `ACCESS_TOKEN`, `SERVER_HOSTNAME`, `HTTP_PATH`  
+The DAG will fail with a clear error if any required field is missing.
 
 ### Key Design Decisions
 
@@ -306,7 +307,7 @@ start → extract → validate → load → archive → check_schema → load_dw
 
 ```python
 schedule='@monthly'           # Run monthly
-start_date=datetime(2020, 1, 1)  # Historical start date
+start_date=datetime(2018, 1, 1)  # Historical start date (2018)
 catchup=True                  # Enable backfilling
 max_active_runs=3             # Run 3 months concurrently
 ```
@@ -493,9 +494,11 @@ The DAG automatically manages schema creation:
 
 #### `check_and_create_dwh_schema()`
 - Connects to Databricks SQL Warehouse
-- Checks if schema exists
-- Creates schema if missing
-- Populates dimensions on first run
+- Validates required credentials (ACCESS_TOKEN, SERVER_HOSTNAME, HTTP_PATH)
+- Checks if schema exists and creates if missing
+- Creates dimension tables (dim_location, dim_time) if not exist
+- Auto-populates dim_time with 96 time slots (every 15 minutes) on first run
+- Creates fact_trips table if not exist
 
 #### `load_to_dwh()`
 - Connects to Databricks SQL Warehouse
@@ -523,13 +526,38 @@ The data warehouse includes built-in data quality features:
 - Validation of trip metrics (duration, distance, amounts)
 - Transaction-based loading with rollback on errors
 
+### Time-Based Analytics
+
+The simplified schema enables powerful time-based analysis:
+
+**Rush Hour Analysis:**
+```sql
+SELECT t.time_of_day, t.is_rush_hour,
+       COUNT(*) as trips,
+       AVG(f.fare_amount) as avg_fare
+FROM fact_trips f
+JOIN dim_time t ON f.pickup_time_key = t.time_key
+GROUP BY t.time_of_day, t.is_rush_hour;
+```
+
+**Business Hours vs Off-Hours:**
+```sql
+SELECT t.is_business_hours,
+       AVG(f.trip_duration_minutes) as avg_duration,
+       AVG(f.trip_distance_miles) as avg_distance
+FROM fact_trips f
+JOIN dim_time t ON f.pickup_time_key = t.time_key
+GROUP BY t.is_business_hours;
+```
+
 ### Performance Optimization
 
 The schema includes:
 - Indexes on all foreign keys
-- Indexes on frequently queried columns (dates, locations)
+- Indexes on frequently queried columns (dates, times, locations)
 - Connection pooling with keep-alive settings
 - Chunked inserts for large datasets (5,000 rows per batch)
+- Simplified dimension model (no separate vendor/payment/rate tables in cloud)
 
 ---
 
@@ -564,21 +592,18 @@ docker compose logs -f airflow-scheduler
 
 **Check dimension populations:**
 ```sql
-SELECT 'dim_date' as table_name, COUNT(*) as records FROM dim_date
+SELECT 'dim_time' as table_name, COUNT(*) as records FROM dim_time
 UNION ALL SELECT 'dim_location', COUNT(*) FROM dim_location
-UNION ALL SELECT 'dim_vendor', COUNT(*) FROM dim_vendor
-UNION ALL SELECT 'dim_payment_type', COUNT(*) FROM dim_payment_type
-UNION ALL SELECT 'dim_rate_code', COUNT(*) FROM dim_rate_code
 UNION ALL SELECT 'fact_trips', COUNT(*) FROM fact_trips
 ORDER BY table_name;
 ```
 
 **Check data quality:**
 ```sql
--- Check for orphan records
-SELECT COUNT(*) as orphaned_trips
+-- Check for orphan records (time dimension)
+SELECT COUNT(*) as orphaned_pickup_times
 FROM fact_trips f
-WHERE NOT EXISTS (SELECT 1 FROM dim_date d WHERE d.date_key = f.pickup_date_key);
+WHERE NOT EXISTS (SELECT 1 FROM dim_time t WHERE t.time_key = f.pickup_time_key);
 
 -- Check trip metrics
 SELECT 
@@ -595,7 +620,22 @@ FROM fact_trips;
 
 ### Common Issues
 
-#### 1. DAG Import Errors
+#### 1. Missing Databricks Credentials
+
+**Error:** `KeyError: 'ACCESS_TOKEN'` or similar
+
+**Solution:** Set the `dwh_db_creds` variable with all required fields:
+```bash
+docker compose exec airflow-scheduler airflow variables set dwh_db_creds '{
+  "ACCESS_TOKEN":"dapi...",
+  "SERVER_HOSTNAME":"your-workspace.cloud.databricks.com",
+  "HTTP_PATH":"/sql/1.0/warehouses/...",
+  "CATALOG":"hive_metastore",
+  "SCHEMA":"default"
+}'
+```
+
+#### 2. DAG Import Errors
 
 **Check for errors:**
 ```bash
@@ -607,7 +647,7 @@ docker compose exec airflow-worker airflow dags list-import-errors
 docker compose exec airflow-worker python /opt/airflow/dags/etl_pipeline.py
 ```
 
-#### 2. Connection Timeouts
+#### 3. Connection Timeouts
 
 **Increase timeout settings in connection string:**
 ```python
@@ -620,7 +660,7 @@ connect_args={
 }
 ```
 
-#### 3. API Rate Limiting
+#### 4. API Rate Limiting
 
 The NYC API may rate limit requests. The DAG includes retry logic:
 ```python
@@ -628,12 +668,12 @@ retries=2
 retry_delay=timedelta(minutes=5)
 ```
 
-#### 4. Memory Issues
+#### 5. Memory Issues
 
 If containers crash, increase Docker memory:
 - Docker Desktop: Settings → Resources → Memory (increase to 6GB+)
 
-#### 5. Failed Task Recovery
+#### 6. Failed Task Recovery
 
 **Clear failed task instances:**
 ```bash

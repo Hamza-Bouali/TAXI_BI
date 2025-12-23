@@ -226,6 +226,12 @@ def check_and_create_dwh_schema(**context):
     # Data Warehouse connection
     dwh_cred = Variable.get("dwh_db_creds", deserialize_json=True)
     
+    # Validate required credentials
+    required_keys = ['ACCESS_TOKEN', 'SERVER_HOSTNAME', 'HTTP_PATH']
+    missing_keys = [key for key in required_keys if key not in dwh_cred]
+    if missing_keys:
+        raise ValueError(f"Missing required Databricks credentials in dwh_db_creds Variable: {', '.join(missing_keys)}")
+    
     print("Connecting to Databricks...")
     # Construct Databricks connection string
     dwh_connection_string = (
@@ -255,6 +261,69 @@ def check_and_create_dwh_schema(**context):
                 )
             """))
             
+            # Create dim_time table if not exists
+            print("Creating dim_time table if not exists...")
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS dim_time (
+                    time_key INT,
+                    hour INT,
+                    minute INT,
+                    time_of_day STRING,
+                    is_business_hours BOOLEAN,
+                    is_rush_hour BOOLEAN,
+                    hour_12 INT,
+                    am_pm STRING
+                )
+            """))
+            
+            # Populate dim_time if empty
+            print("Checking dim_time population...")
+            result = conn.execute(text("SELECT COUNT(*) FROM dim_time"))
+            time_count = result.scalar()
+            
+            if time_count == 0:
+                print("Populating dim_time with all 24-hour time values...")
+                time_records = []
+                for hour in range(24):
+                    for minute in range(0, 60, 15):  # Every 15 minutes
+                        time_key = hour * 100 + minute
+                        
+                        # Determine time of day
+                        if 5 <= hour < 12:
+                            time_of_day = 'Morning'
+                        elif 12 <= hour < 17:
+                            time_of_day = 'Afternoon'
+                        elif 17 <= hour < 21:
+                            time_of_day = 'Evening'
+                        else:
+                            time_of_day = 'Night'
+                        
+                        # Business hours: 9 AM to 5 PM
+                        is_business_hours = 9 <= hour < 17
+                        
+                        # Rush hours: 7-9 AM and 5-7 PM
+                        is_rush_hour = (7 <= hour < 9) or (17 <= hour < 19)
+                        
+                        # 12-hour format
+                        hour_12 = hour if hour <= 12 else hour - 12
+                        hour_12 = 12 if hour_12 == 0 else hour_12
+                        am_pm = 'AM' if hour < 12 else 'PM'
+                        
+                        time_records.append(
+                            f"({time_key}, {hour}, {minute}, '{time_of_day}', {is_business_hours}, {is_rush_hour}, {hour_12}, '{am_pm}')"
+                        )
+                
+                # Insert in batches
+                batch_size = 100
+                for i in range(0, len(time_records), batch_size):
+                    batch = time_records[i:i + batch_size]
+                    insert_sql = f"INSERT INTO dim_time (time_key, hour, minute, time_of_day, is_business_hours, is_rush_hour, hour_12, am_pm) VALUES {', '.join(batch)}"
+                    conn.execute(text(insert_sql))
+                
+                print(f"✓ Inserted {len(time_records)} time records")
+            else:
+                print(f"  dim_time already populated with {time_count} records")
+            
             # Create fact_trips table if not exists
             print("Creating fact_trips table if not exists...")
             conn.execute(text("""
@@ -266,6 +335,8 @@ def check_and_create_dwh_schema(**context):
                     payment_type_key INT,
                     rate_code_key INT,
                     pickup_date_key INT,
+                    pickup_time_key INT,
+                    dropoff_time_key INT,
                     passenger_count INT,
                     trip_distance_miles FLOAT,
                     trip_duration_minutes INT,
@@ -297,6 +368,12 @@ def load_to_dwh(**context):
     
     # Data Warehouse connection
     dwh_cred = Variable.get("dwh_db_creds", deserialize_json=True)
+    
+    # Validate required credentials
+    required_keys = ['ACCESS_TOKEN', 'SERVER_HOSTNAME', 'HTTP_PATH']
+    missing_keys = [key for key in required_keys if key not in dwh_cred]
+    if missing_keys:
+        raise ValueError(f"Missing required Databricks credentials in dwh_db_creds Variable: {', '.join(missing_keys)}")
     
     dwh_connection_string = (
         f"databricks://token:{dwh_cred['ACCESS_TOKEN']}@"
@@ -349,6 +426,15 @@ def load_to_dwh(**context):
         
         # Extract date key (YYYYMMDD format)
         df['pickup_date_key'] = df['lpep_pickup_datetime'].dt.strftime('%Y%m%d').astype(int)
+        
+        # Extract time keys (HHMM format, rounded to nearest 15 minutes)
+        df['pickup_hour'] = df['lpep_pickup_datetime'].dt.hour
+        df['pickup_minute'] = (df['lpep_pickup_datetime'].dt.minute // 15) * 15
+        df['pickup_time_key'] = df['pickup_hour'] * 100 + df['pickup_minute']
+        
+        df['dropoff_hour'] = df['lpep_dropoff_datetime'].dt.hour
+        df['dropoff_minute'] = (df['lpep_dropoff_datetime'].dt.minute // 15) * 15
+        df['dropoff_time_key'] = df['dropoff_hour'] * 100 + df['dropoff_minute']
         
         # Apply remaining filters
         df = df[
@@ -440,6 +526,8 @@ def load_to_dwh(**context):
                     'payment_type_key': df['payment_type_key'],
                     'rate_code_key': df['rate_code_key'],
                     'pickup_date_key': df['pickup_date_key'],
+                    'pickup_time_key': df['pickup_time_key'].astype(int),
+                    'dropoff_time_key': df['dropoff_time_key'].astype(int),
                     'passenger_count': df['passenger_count'].astype('Int16'),
                     'trip_distance_miles': df['trip_distance'].astype(float),
                     'trip_duration_minutes': df['trip_duration_minutes'].astype('Int16'),
@@ -559,7 +647,7 @@ with DAG(
     description='Extract NYC Green Taxi data with date-based backfilling',
     
     schedule='@monthly',  # Run monthly to get each month's data
-    start_date=datetime(2020, 1, 1),  # Start from January 2024
+    start_date=datetime(2018, 1, 1),  # Start from January 2024
     catchup=True,  # Enable backfilling for historical data
     max_active_runs=3,  # Limit concurrent runs
     tags=['nyc', 'taxi', 'etl', 'green-taxi'],
