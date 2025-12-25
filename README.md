@@ -40,8 +40,8 @@ graph TD
 
 ## WorkFlow
 
+<img width="3596" height="1017" alt="arch(1)" src="https://github.com/user-attachments/assets/4d29067e-f1ef-4911-ae20-6bf864cd82f7" />
 
-<img width="3596" height="1017" alt="arch" src="https://github.com/user-attachments/assets/6b84fcc2-cd7a-4697-836c-8a60efcf432d" />
 
 ## Table of Contents
 
