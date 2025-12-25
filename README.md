@@ -38,6 +38,11 @@ graph TD
     
 ```
 
+## WorkFlow
+
+
+<img width="3596" height="1017" alt="arch" src="https://github.com/user-attachments/assets/6b84fcc2-cd7a-4697-836c-8a60efcf432d" />
+
 ## Table of Contents
 
 - [Data Warehouse Schema](#data-warehouse-schema)
