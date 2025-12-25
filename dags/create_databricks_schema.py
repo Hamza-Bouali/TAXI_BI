@@ -68,9 +68,9 @@ def create_dimension_tables(**context):
             if result.scalar() == 0:
                 print("Populating dim_vendor...")
                 conn.execute(text("""
-                    INSERT INTO dim_vendor (vendor_id, vendor_name, description, is_active) VALUES
-                    (1, 'Creative Mobile Technologies, LLC', 'CMT - Creative Mobile Technologies', TRUE),
-                    (2, 'VeriFone Inc.', 'VeriFone taxi technology provider', TRUE)
+                    INSERT INTO dim_vendor (vendor_id, vendor_name, description, is_active, created_date) VALUES
+                    (1, 'Creative Mobile Technologies, LLC', 'CMT - Creative Mobile Technologies', TRUE, CURRENT_TIMESTAMP()),
+                    (2, 'VeriFone Inc.', 'VeriFone taxi technology provider', TRUE, CURRENT_TIMESTAMP())
                 """))
                 print("✓ Vendor dimension populated")
             

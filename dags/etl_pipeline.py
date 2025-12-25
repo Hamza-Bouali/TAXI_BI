@@ -818,7 +818,7 @@ with DAG(
     description='Extract NYC Green Taxi data with date-based backfilling',
     
     schedule='@monthly',  # Run monthly to get each month's data
-    start_date=datetime(2018, 1, 1),  # Start from January 2024
+    start_date=datetime(2018, 1, 1),  # Start from January 2018
     catchup=True,  # Enable backfilling for historical data
     max_active_runs=3,  # Limit concurrent runs
     tags=['nyc', 'taxi', 'etl', 'green-taxi'],
