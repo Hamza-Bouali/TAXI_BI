@@ -40,7 +40,7 @@ graph TD
 
 ## WorkFlow
 
-![Uploading arch(2).png…]()
+<img width="3596" height="1017" alt="arch(2)" src="https://github.com/user-attachments/assets/654ca977-9543-4bac-8f3e-c9b53d94edc3" />
 
 
 ## Table of Contents
